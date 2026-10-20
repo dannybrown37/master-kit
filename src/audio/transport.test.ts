@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { Transport } from "./transport.ts";
+import { PREROLL_SECONDS, Transport, startDelay } from "./transport.ts";
+
+describe("startDelay", () => {
+  it.each([
+    ["from the top: a pre-roll, so a waking audio device can't swallow the first hit", 0, false, 0, PREROLL_SECONDS],
+    ["from the top with a longer lead-in: the lead-in", 0, false, 0.4, 0.4],
+    ["mid-song, device already running: right away", 30, false, 0.4, 0],
+    ["mid-song, device just woke: a pre-roll", 30, true, 0, PREROLL_SECONDS],
+  ])("%s", (_name, from, woke, leadIn, want) => {
+    expect(startDelay(from, woke, leadIn)).toBe(want);
+  });
+});
 
 describe("Transport", () => {
   it("advances while playing and holds while paused", () => {
@@ -37,6 +48,23 @@ describe("Transport", () => {
     t.play(0);
     expect(t.position(70)).toBe(60);
     expect(t.ended(70)).toBe(true);
+  });
+
+  it("a delayed start holds the position until the audio starts", () => {
+    const t = new Transport(60);
+    t.seek(10, 0);
+    expect(t.play(100, () => 0.5)).toBe(10);
+    expect(t.startTime).toBe(100.5);
+    expect(t.position(100.2)).toBe(10);
+    expect(t.position(101.5)).toBeCloseTo(11, 9);
+  });
+
+  it("the delay is chosen from where playback starts", () => {
+    const t = new Transport(60);
+    t.seek(60, 0);
+    const seen: number[] = [];
+    t.play(1, (from) => (seen.push(from), 0));
+    expect(seen).toEqual([0]);
   });
 
   it("play at the end restarts from the top", () => {

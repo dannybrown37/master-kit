@@ -6,6 +6,7 @@
 import type { Report } from "../analysis/report.ts";
 import { ANALYSER_TILT_DB_PER_OCT, BANDS, relativeGaps, tiltedShares } from "../analysis/spectrum.ts";
 import { TARGETS } from "../analysis/targets.ts";
+import { EDGE_RULES, hardEdges } from "./hints.ts";
 import { GENTLE_GLUE, applyPreset } from "./presets.ts";
 import { MB_OFF_DB, MB_THRESHOLDS, clampParam, defaultSettings, formatParam, noBypass } from "./settings.ts";
 import type { Bypass, ParamKey, Settings } from "./settings.ts";
@@ -152,7 +153,28 @@ export function planMaster({ original: o, reference: ref = null }: PlanInput): P
   set("limCeiling", TARGETS.truePeakMax);
   set("limDrive", TARGETS.integrated - o.integrated);
   steps.push(`Limiter: ceiling ${formatParam("limCeiling", s.limCeiling)} (safe for mp3/AAC encoding).`);
+  steps.push(...planEdges(o, set));
   return { settings: s, bypass, steps };
+}
+
+function planEdges(o: Report, set: (key: ParamKey, value: number) => number): string[] {
+  const r = EDGE_RULES;
+  const hard = hardEdges(o);
+  const steps: string[] = [];
+  if (hard.start) {
+    if (o.edges.leadSeconds < r.minLeadSeconds) set("edgeLeadMs", r.leadMs);
+    set("edgeFadeInMs", r.fadeInMs);
+    steps.push(`Edges: the song hits ${f1(o.edges.startDb)} dBFS right away → ${r.fadeInMs} ms fade-in (no click)${o.edges.leadSeconds < r.minLeadSeconds ? ` and ${r.leadMs} ms of silence first, so a player waking up can't swallow the first hit` : ""}.`);
+  }
+  if (hard.end) {
+    set("edgeFadeOutMs", r.fadeOutMs);
+    steps.push(`Edges: it stops on a hard cut (${f1(o.edges.endDb)} dBFS) → ${r.fadeOutMs} ms fade-out, so the ending stays abrupt but doesn't click. For a fade to silence, set Fade-out to a few seconds.`);
+  }
+  if (o.edges.tailSeconds < r.minTailSeconds) {
+    set("edgeTailMs", r.tailMs);
+    steps.push(`Edges: ${formatParam("edgeTailMs", r.tailMs)} of silence after the last sound, so the next track doesn't crash in.`);
+  }
+  return steps;
 }
 
 /** Softer dynamics for when the master lost too much PLR: the glue compressor first, then the multiband. Null: nothing left to ease. */

@@ -18,6 +18,7 @@ export function report(over: Partial<Report> = {}, bands: number[] = [-6, -4, -1
     bands: BANDS.map((b, i) => ({ ...b, db: bands[i] })),
     stereo: { correlation: 0.8, sideDb: -10 },
     shortTerm: [],
+    edges: { leadSeconds: 0.2, tailSeconds: 1, startDb: -50, endDb: -60 },
     ...over,
   };
 }

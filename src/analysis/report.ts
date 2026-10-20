@@ -1,3 +1,5 @@
+import { edgeStats } from "./edges.ts";
+import type { EdgeStats } from "./edges.ts";
 import { loudness, loudnessRange } from "./loudness.ts";
 import { ampToDb, samplePeak, truePeak } from "./peak.ts";
 import { bandEnergies } from "./spectrum.ts";
@@ -27,6 +29,7 @@ export interface Report {
   stereo: StereoImage;
   /** Short-term loudness every 100 ms (LUFS), for plotting. */
   shortTerm: number[];
+  edges: EdgeStats;
 }
 
 /** Sample peak over RMS across all channels, dB. */
@@ -66,5 +69,6 @@ export function analyze(channels: Float32Array[], sampleRate: number): Report {
     bands: bandEnergies(channels, sampleRate),
     stereo: stereoImage(channels),
     shortTerm: l.shortTerm,
+    edges: edgeStats(channels, sampleRate),
   };
 }

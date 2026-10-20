@@ -7,6 +7,8 @@ export const MODULE_HELP: Record<Module, string> = {
     "Multiband: three compressors, each on its own slice of the spectrum (low, mid, high). It tames one range only when it gets loud: a booming bass note or a harsh cymbal, without touching the rest. Every band starts off; lower a band's threshold until its GR moves.",
   comp: "Compressor: turns loud moments down so the song feels denser. Watch the GR meter: 1–3 dB is typical glue for a master.",
   limiter: "Limiter: a very fast, very high-ratio compressor that stops peaks at the ceiling. Drive pushes the song into it to make it louder.",
+  edges:
+    "Edges: the silence and fades around the song, applied to the exported file (fades also play live). There's no formal standard; common practice is a few ms fade-in, 0–500 ms of silence before, a clean fade at the end and ~1 s of silence after. Everything starts off.",
 };
 
 export const PARAM_HELP: Record<ParamKey, string> = {
@@ -47,6 +49,12 @@ export const PARAM_HELP: Record<ParamKey, string> = {
   limDrive: "Gain into the limiter. Positive = louder and more limiting; negative turns a hot song down to the streaming target.",
   limCeiling: "The highest the output may reach. -1 dBTP leaves room for lossy encoding (Spotify, YouTube) without clipping.",
   limRelease: "How fast the limiter recovers. Short = louder but can distort; long = cleaner but can duck after hits.",
+  edgeLeadMs:
+    "Silence before the first sound (counting what's already in the file). Players and Bluetooth speakers can take ~100 ms to start, so a song that hits on its first sample loses that hit. 100–300 ms is plenty.",
+  edgeFadeInMs: "A fade from silence at the first sound. 2–10 ms removes the click of starting mid-waveform without softening the hit; longer fades the intro in.",
+  edgeFadeOutMs:
+    "A fade to silence ending at the last sound. ~100 ms declicks a hard cut and keeps the ending abrupt; 3–10 s fades the song away (a decision about the arrangement, so A/B it).",
+  edgeTailMs: "Silence after the last sound (counting what's already in the file), so the next track or an ad doesn't crash in. ~1 s is typical; less for albums meant to play gapless.",
 };
 
 export const METER_HELP = {

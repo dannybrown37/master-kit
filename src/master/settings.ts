@@ -1,14 +1,16 @@
 /** Every knob on the desk: ranges, defaults, and the mapping to each processing module. */
 import type { CompressorParams } from "../dsp/compressor.ts";
+import { NEUTRAL_EDGES } from "../dsp/edges.ts";
+import type { EdgeParams } from "../dsp/edges.ts";
 import type { LimiterParams } from "../dsp/limiter.ts";
 import { NEUTRAL_BAND } from "../dsp/multiband.ts";
 import type { MultibandParams } from "../dsp/multiband.ts";
 
 /** In signal order. */
-export type Module = "eq" | "multi" | "comp" | "limiter";
-export const MODULES: readonly Module[] = ["eq", "multi", "comp", "limiter"];
+export type Module = "eq" | "multi" | "comp" | "limiter" | "edges";
+export const MODULES: readonly Module[] = ["eq", "multi", "comp", "limiter", "edges"];
 export type Bypass = Record<Module, boolean>;
-export const MODULE_NAMES: Record<Module, string> = { eq: "EQ", multi: "Multiband", comp: "Compressor", limiter: "Limiter" };
+export const MODULE_NAMES: Record<Module, string> = { eq: "EQ", multi: "Multiband", comp: "Compressor", limiter: "Limiter", edges: "Edges" };
 
 export function noBypass(): Bypass {
   return Object.fromEntries(MODULES.map((m) => [m, false])) as Bypass;
@@ -62,6 +64,10 @@ export const PARAMS = [
   { key: "limDrive", module: "limiter", label: "Drive", unit: "dB", min: -12, max: 12, step: 0.1, scale: "lin", default: 0 },
   { key: "limCeiling", module: "limiter", label: "Ceiling", unit: "dBTP", min: -3, max: 0, step: 0.1, scale: "lin", default: -1 },
   { key: "limRelease", module: "limiter", label: "Release", unit: "ms", min: 10, max: 500, step: 1, scale: "log", default: 50 },
+  { key: "edgeLeadMs", module: "edges", label: "Lead-in", unit: "ms", min: 0, max: 2000, step: 10, scale: "lin", default: 0 },
+  { key: "edgeFadeInMs", module: "edges", label: "Fade-in", unit: "ms", min: 0, max: 200, step: 1, scale: "lin", default: 0 },
+  { key: "edgeFadeOutMs", module: "edges", label: "Fade-out", unit: "ms", min: 0, max: 10000, step: 10, scale: "lin", default: 0 },
+  { key: "edgeTailMs", module: "edges", label: "Tail", unit: "ms", min: 0, max: 5000, step: 10, scale: "lin", default: 0 },
 ] as const satisfies readonly ParamSpec[];
 
 export type ParamKey = (typeof PARAMS)[number]["key"];
@@ -118,6 +124,8 @@ export const MONO_BASS_OFF_HZ = 20;
 export const MB_OFF_DB = 0;
 export const MB_THRESHOLDS = ["mbLowThreshold", "mbMidThreshold", "mbHighThreshold"] as const;
 export const MB_GAINS = ["mbLowGain", "mbMidGain", "mbHighGain"] as const;
+export const EDGE_KEYS = ["edgeLeadMs", "edgeFadeInMs", "edgeFadeOutMs", "edgeTailMs"] as const;
+type EdgeKey = (typeof EDGE_KEYS)[number];
 
 export function formatParam(key: ParamKey, value: number): string {
   const { unit, min } = spec(key);
@@ -125,8 +133,10 @@ export function formatParam(key: ParamKey, value: number): string {
   if (key === "eqMonoBassHz" && value <= MONO_BASS_OFF_HZ) return "off";
   if ((MB_THRESHOLDS as readonly string[]).includes(key) && value >= MB_OFF_DB) return "off";
   if (key === "compRmsMs") return value <= 0 ? "peak" : `RMS ${Math.round(value)} ms`;
+  if (EDGE_KEYS.includes(key as EdgeKey) && value <= 0) return "off";
   if (unit === "%") return value === 0 ? "mono" : `${Math.round(value)}%`;
   if (unit === "Hz") return value >= 1000 ? `${(value / 1000).toFixed(1)} kHz` : `${Math.round(value)} Hz`;
+  if (unit === "ms" && value > 1000) return `${(value / 1000).toFixed(1)} s`;
   if (unit === "ms") return `${value < 10 ? value.toFixed(1) : Math.round(value)} ms`;
   const text = value.toFixed(1);
   const signed = min < 0 && value > 0 ? `+${text}` : text;
@@ -206,6 +216,11 @@ export function multibandParams(s: Settings, bypass: Bypass): MultibandParams {
     bypass.multi ? NEUTRAL_BAND : { thresholdDb: s[t] >= MB_OFF_DB ? Infinity : s[t], gainDb: s[MB_GAINS[i]] },
   );
   return { lowHz: s.mbLowHz, highHz: s.mbHighHz, bands, ratio: s.mbRatio, attackMs: s.mbAttack, releaseMs: s.mbRelease };
+}
+
+export function edgeParams(s: Settings, bypass: Bypass): EdgeParams {
+  if (bypass.edges) return NEUTRAL_EDGES;
+  return { lead: s.edgeLeadMs / 1000, fadeIn: s.edgeFadeInMs / 1000, fadeOut: s.edgeFadeOutMs / 1000, tail: s.edgeTailMs / 1000 };
 }
 
 /** A bypassed limiter keeps its delay (so A/B stays time-aligned) but never touches the signal. */

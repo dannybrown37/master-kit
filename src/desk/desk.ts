@@ -9,7 +9,7 @@ import { hints } from "../master/hints.ts";
 import type { Hint } from "../master/hints.ts";
 import { LISTENS, meterPair, referenceMatchDb } from "../master/monitor.ts";
 import type { Listen } from "../master/monitor.ts";
-import { SPECTRUM_BINS } from "../audio/engine.ts";
+import { SPECTRUM_BINS, isDynamics } from "../audio/engine.ts";
 import { SpectrumView } from "./spectrum-view.ts";
 import { EQ_BAND_KNOBS, soloBand } from "./eq-drag.ts";
 import { score } from "../master/score.ts";
@@ -20,10 +20,11 @@ import type { MasterAudio } from "../audio/auto.ts";
 import { checklist } from "../master/checklist.ts";
 import { PRESETS, applyPreset } from "../master/presets.ts";
 import type { Preset } from "../master/presets.ts";
-import { MODULES, MODULE_NAMES, PARAMS, changedParams, clampParam, defaultSettings, eqBands, formatParam, fromFraction, nudge, toFraction } from "../master/settings.ts";
+import { EDGE_KEYS, MODULES, MODULE_NAMES, PARAMS, changedParams, clampParam, defaultSettings, edgeParams, eqBands, formatParam, fromFraction, nudge, toFraction } from "../master/settings.ts";
 import type { Bypass, Module, ParamKey, Settings } from "../master/settings.ts";
 import { snapshotDiff } from "../master/snapshot.ts";
 import { parseSession, safeBaseName, sessionFileName, toSession } from "../master/session.ts";
+import { applyEdges } from "../dsp/edges.ts";
 import { encodeWav } from "../export/wav.ts";
 import type { BitDepth } from "../export/wav.ts";
 import { DrillView } from "../drills/view.ts";
@@ -75,8 +76,10 @@ export interface Measured {
 
 export type Mode = "desk" | "drills";
 
+/** Identifies a render. Edges are left out: they're applied at export, so changing them needs no new render. */
 export function settingsKey(settings: Settings, bypass: Bypass): string {
-  return JSON.stringify([settings, bypass]);
+  const rendered = Object.fromEntries(Object.entries(settings).filter(([k]) => !(EDGE_KEYS as readonly string[]).includes(k)));
+  return JSON.stringify([rendered, { ...bypass, edges: false }]);
 }
 
 export function channelsOf(buffer: AudioBuffer): Float32Array[] {
@@ -294,8 +297,8 @@ export class Desk {
       this.liveScoreEl,
     );
     // Compressor and limiter share a column: four modules side by side would squeeze the knobs.
-    const [eqPanel, multiPanel, compPanel, limiterPanel] = modulePanels;
-    this.deskEl = h("main", "desk", eqPanel, multiPanel, h("div", "stack", compPanel, limiterPanel), meterPanel);
+    const [eqPanel, multiPanel, compPanel, limiterPanel, edgesPanel] = modulePanels;
+    this.deskEl = h("main", "desk", eqPanel, multiPanel, h("div", "stack", compPanel, limiterPanel), h("div", "stack meters-col", meterPanel, edgesPanel));
 
     this.explainEl = h("section", "panel explain");
     this.scoreEl = h("section", "panel scorecard");
@@ -544,7 +547,8 @@ export class Desk {
   protected async exportWav(bits: BitDepth): Promise<void> {
     const m = await this.measureMaster();
     if (!m) return;
-    const wav = encodeWav(m.rendered.master, m.rendered.sampleRate, bits);
+    const { settings, bypass } = this.state;
+    const wav = encodeWav(applyEdges(m.rendered.master, m.rendered.sampleRate, edgeParams(settings, bypass)), m.rendered.sampleRate, bits);
     const name = `${safeBaseName(this.track)} (master ${bits}-bit).wav`;
     download(new Blob([wav], { type: "audio/wav" }), name);
     const r = m.report;
@@ -664,7 +668,7 @@ export class Desk {
       this.knobs.set(key, { row, bar, value });
     }
     const view: PanelView = { el, bypass };
-    if (module !== "eq") {
+    if (isDynamics(module)) {
       const grRow = (name: string): { bar: MeterBar; value: HTMLElement } => {
         const bar = new MeterBar(0, GR_MAX);
         const value = h("span", "value");

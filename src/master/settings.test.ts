@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { BUTTERWORTH_Q_DB, PARAMS, clampParam, compressorParams, defaultSettings, eqBands, formatParam, fromFraction, changedParams, limiterParams, multibandParams, noBypass, nudge, parseSettings, stereoParams, toFraction } from "./settings.ts";
+import { BUTTERWORTH_Q_DB, PARAMS, clampParam, compressorParams, defaultSettings, edgeParams, eqBands, formatParam, fromFraction, changedParams, limiterParams, multibandParams, noBypass, nudge, parseSettings, stereoParams, toFraction } from "./settings.ts";
 import { Compressor } from "../dsp/compressor.ts";
+import { NEUTRAL_EDGES } from "../dsp/edges.ts";
 import { Limiter } from "../dsp/limiter.ts";
 import { SR, sine } from "../analysis/test-signals.ts";
 
 const NO_BYPASS = noBypass();
-const ALL_BYPASS = { eq: true, multi: true, comp: true, limiter: true };
+const ALL_BYPASS = { eq: true, multi: true, comp: true, limiter: true, edges: true };
 
 describe("settings", () => {
   it("every default sits inside its range", () => {
@@ -74,6 +75,10 @@ describe("settings", () => {
     expect(formatParam("compRmsMs", 30)).toBe("RMS 30 ms");
     expect(formatParam("mbLowThreshold", 0)).toBe("off");
     expect(formatParam("mbLowThreshold", -12)).toBe("-12.0 dB");
+    expect(formatParam("edgeLeadMs", 0)).toBe("off");
+    expect(formatParam("edgeFadeInMs", 5)).toBe("5.0 ms");
+    expect(formatParam("edgeLeadMs", 200)).toBe("200 ms");
+    expect(formatParam("edgeFadeOutMs", 2500)).toBe("2.5 s");
   });
 
   it.each([
@@ -151,6 +156,17 @@ describe("module parameters", () => {
     const out = render(ALL_BYPASS);
     for (let i = 0; i < out.length; i += 97) expect(out[i]).toBeCloseTo(ref[i], 6);
     expect(Math.max(...render(NO_BYPASS).map(Math.abs))).not.toBeCloseTo(Math.max(...out.map(Math.abs)), 1);
+  });
+});
+
+describe("edgeParams", () => {
+  const set = { edgeLeadMs: 200, edgeFadeInMs: 5, edgeFadeOutMs: 1500, edgeTailMs: 1000 };
+  it.each([
+    ["defaults: untouched", {}, NO_BYPASS, NEUTRAL_EDGES],
+    ["milliseconds become seconds", set, NO_BYPASS, { lead: 0.2, fadeIn: 0.005, fadeOut: 1.5, tail: 1 }],
+    ["bypassed: untouched", set, ALL_BYPASS, NEUTRAL_EDGES],
+  ])("%s", (_name, over, bypass, want) => {
+    expect(edgeParams({ ...defaultSettings(), ...over }, bypass)).toEqual(want);
   });
 });
 

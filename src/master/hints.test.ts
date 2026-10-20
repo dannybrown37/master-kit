@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { hints } from "./hints.ts";
 import type { HintInput } from "./hints.ts";
 import { defaultSettings, noBypass } from "./settings.ts";
+import type { Settings } from "./settings.ts";
 import { report } from "./test-report.ts";
 
 const NO_BYPASS = noBypass();
@@ -190,6 +191,49 @@ describe("hints", () => {
   it("no width hint when within 3 dB of the reference", () => {
     const reference = report({ stereo: { correlation: 0.8, sideDb: -12 } });
     expect(find(hints(input({ master: report({ stereo: { correlation: 0.9, sideDb: -10 } }), reference })), /side/)).toBeUndefined();
+  });
+
+  describe("edges", () => {
+    const CLEAN = { leadSeconds: 0.2, tailSeconds: 1, startDb: -50, endDb: -60 };
+    const HARD = { leadSeconds: 0, tailSeconds: 0, startDb: -1, endDb: -2 };
+    const edgeHints = (edges: typeof CLEAN, over: Partial<Settings> = {}, bypass = NO_BYPASS): ReturnType<typeof hints> =>
+      hints(input({ original: report({ edges }), settings: { ...defaultSettings(), ...over }, bypass })).filter((h) => h.knob?.startsWith("edge"));
+
+    it("a clean start and end: nothing to say", () => {
+      expect(edgeHints(CLEAN)).toEqual([]);
+    });
+
+    it("a song at full level from its first sample to its last: one hint per edge knob, before any measurement", () => {
+      const list = hints(input({ original: report({ edges: HARD }), master: null })).filter((h) => h.knob?.startsWith("edge"));
+      expect(list.map((h) => [h.knob, h.level, h.suggest])).toEqual([
+        ["edgeLeadMs", "warn", 200],
+        ["edgeFadeOutMs", "warn", 100],
+        ["edgeFadeInMs", "info", 5],
+        ["edgeTailMs", "info", 1000],
+      ]);
+    });
+
+    it("applying every suggestion clears every edge hint", () => {
+      const s = defaultSettings();
+      const applied = { ...s };
+      for (const h of edgeHints(HARD)) if (h.knob && h.suggest !== undefined) applied[h.knob] = s[h.knob] + h.suggest;
+      expect(edgeHints(HARD, applied)).toEqual([]);
+    });
+
+    it.each([
+      ["quiet first hit: no lead-in needed", { ...HARD, startDb: -40 }, {}, ["edgeFadeOutMs", "edgeTailMs"]],
+      ["lead-in already in the file", { ...HARD, leadSeconds: 0.15 }, {}, ["edgeFadeOutMs", "edgeFadeInMs", "edgeTailMs"]],
+      ["tail already in the file", { ...HARD, tailSeconds: 0.8 }, {}, ["edgeLeadMs", "edgeFadeOutMs", "edgeFadeInMs"]],
+      ["lead-in knob set but no fade-in", HARD, { edgeLeadMs: 300 }, ["edgeFadeOutMs", "edgeFadeInMs", "edgeTailMs"]],
+    ])("%s", (_name, edges, over, knobs) => {
+      expect(edgeHints(edges, over).map((h) => h.knob)).toEqual(knobs);
+    });
+
+    it("bypassing Edges brings the hints back", () => {
+      const fixed = { edgeLeadMs: 200, edgeFadeInMs: 5, edgeFadeOutMs: 100, edgeTailMs: 1000 };
+      expect(edgeHints(HARD, fixed)).toEqual([]);
+      expect(edgeHints(HARD, fixed, { ...NO_BYPASS, edges: true })).toHaveLength(4);
+    });
   });
 
   it("sorts problems first", () => {

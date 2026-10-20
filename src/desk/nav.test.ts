@@ -17,8 +17,9 @@ describe("desk navigation", () => {
   it.each([
     ["tab goes to the multiband", 1, "multi"],
     ["two tabs go to the compressor", 2, "comp"],
-    ["shift-tab wraps to the limiter", -1, "limiter"],
-    ["four tabs come back to EQ", 4, "eq"],
+    ["three tabs go to the limiter", 3, "limiter"],
+    ["shift-tab wraps to edges", -1, "edges"],
+    ["five tabs come back to EQ", 5, "eq"],
   ] as const)("%s", (_name, delta, want) => {
     expect(moveModule(initialNav(), delta).module).toBe(want);
   });

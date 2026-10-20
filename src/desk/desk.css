@@ -143,6 +143,7 @@ header h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: 0.05em; }
 @media (max-width: 640px) {
   .app { padding: 8px; }
   .desk { grid-template-columns: minmax(0, 1fr); }
+  .desk .meters-col { display: contents; }
   .desk .meters { order: -1; position: sticky; top: 0; z-index: 1; }
   .knob { grid-template-columns: 8em minmax(40px, 1fr) 6em; }
   .meter { grid-template-columns: 6.5em minmax(30px, 1fr) 4.8em 4em; }

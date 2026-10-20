@@ -19,6 +19,7 @@ const CASES: [string, Report, Report | null][] = [
   ["out of phase", report({ stereo: { correlation: -0.2, sideDb: -2 } }, tilted()), null],
   ["reference identical to the song", report({}, tilted({ 0: 7 })), report({}, tilted({ 0: 7 }))],
   ["reference much wider", report({}, tilted()), report({ stereo: { correlation: 0.5, sideDb: -4 } }, tilted())],
+  ["full level from the first sample to the last", report({ edges: { leadSeconds: 0, tailSeconds: 0, startDb: -1, endDb: -2 } }, tilted()), null],
 ];
 
 describe("planMaster", () => {
@@ -75,7 +76,17 @@ describe("planMaster", () => {
     expect(s.eqWidth).toBeLessThanOrEqual(130);
   });
 
-  it.each(CASES)("%s: every value is a legal knob setting", (_name, original, reference) => {
+  it.each([
+    ["clean edges: left alone", { leadSeconds: 0.3, tailSeconds: 1.5, startDb: -45, endDb: -60 }, [0, 0, 0, 0]],
+    ["hard start and hard cut: lead-in, declick fades, tail", { leadSeconds: 0, tailSeconds: 0, startDb: -1, endDb: -2 }, [200, 5, 100, 1000]],
+    ["quiet start, natural decay, no silence after: only a tail", { leadSeconds: 0, tailSeconds: 0.01, startDb: -45, endDb: -58 }, [0, 0, 0, 1000]],
+  ])("edges: %s", (_name, edges, want) => {
+    const { settings: s, steps } = planMaster({ original: report({ edges }, tilted()) });
+    expect([s.edgeLeadMs, s.edgeFadeInMs, s.edgeFadeOutMs, s.edgeTailMs]).toEqual(want);
+    expect(steps.some((x) => x.startsWith("Edges:"))).toBe(want.some((v) => v > 0));
+  });
+
+  it.each(CASES)("%s: every value is a legal knob setting",(_name, original, reference) => {
     const { settings } = planMaster({ original, reference });
     expect(parseSettings(settings)).toEqual(settings);
   });

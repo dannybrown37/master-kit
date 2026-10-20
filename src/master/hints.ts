@@ -2,7 +2,7 @@
 import type { Report } from "../analysis/report.ts";
 import { relativeGaps } from "../analysis/spectrum.ts";
 import { TARGETS } from "../analysis/targets.ts";
-import { PARAMS, SIDECHAIN_OFF_HZ, defaultSettings, formatParam } from "./settings.ts";
+import { PARAMS, SIDECHAIN_OFF_HZ, defaultSettings, edgeParams, formatParam } from "./settings.ts";
 import type { Bypass, ParamKey, Settings } from "./settings.ts";
 
 export type HintLevel = "bad" | "warn" | "info" | "good";
@@ -161,6 +161,56 @@ function settingHints(o: Report, s: Settings, bypass: Bypass): Hint[] {
   return out;
 }
 
+/** Shared with auto-master, so its plan never trips these hints. */
+export const EDGE_RULES = {
+  /** Above this in its first/last 10 ms, the song starts on a hit or stops on a cut. */
+  hotDb: -30,
+  minLeadSeconds: 0.1,
+  minTailSeconds: 0.5,
+  leadMs: 200,
+  fadeInMs: 5,
+  fadeOutMs: 100,
+  tailMs: 1000,
+} as const;
+
+/** True when the song starts on a hit / stops on a cut, so it needs a lead-in and fade-in / a fade-out. */
+export function hardEdges(o: Report): { start: boolean; end: boolean } {
+  return { start: o.edges.startDb > EDGE_RULES.hotDb, end: o.edges.endDb > EDGE_RULES.hotDb };
+}
+
+/** From the original's edges: the limiter doesn't change where the sound starts or stops. */
+function edgeHints(o: Report, s: Settings, bypass: Bypass): Hint[] {
+  const p = edgeParams(s, bypass);
+  const e = o.edges;
+  const r = EDGE_RULES;
+  const hard = hardEdges(o);
+  const ms = (x: number): string => `${Math.round(x * 1000)} ms`;
+  const out: Hint[] = [];
+  if (hard.start && Math.max(e.leadSeconds, p.lead) < r.minLeadSeconds) {
+    out.push({
+      level: "warn",
+      text: `The song hits ${f1(e.startDb)} dBFS ${ms(e.leadSeconds)} in: players and Bluetooth speakers that take a moment to start swallow that first hit. Set Lead-in to ~${r.leadMs} ms (Edges).`,
+      knob: "edgeLeadMs",
+      suggest: r.leadMs - s.edgeLeadMs,
+    });
+  }
+  if (hard.start && p.fadeIn <= 0) {
+    out.push({ level: "info", text: `It starts mid-waveform, which can click. A ${r.fadeInMs} ms Fade-in removes the click without softening the hit.`, knob: "edgeFadeInMs", suggest: r.fadeInMs - s.edgeFadeInMs });
+  }
+  if (hard.end && p.fadeOut <= 0) {
+    out.push({
+      level: "warn",
+      text: `It stops on a hard cut at ${f1(e.endDb)} dBFS, which clicks. A ${r.fadeOutMs} ms Fade-out keeps the abrupt ending without the click; a few seconds fades the song away.`,
+      knob: "edgeFadeOutMs",
+      suggest: r.fadeOutMs - s.edgeFadeOutMs,
+    });
+  }
+  if (Math.max(e.tailSeconds, p.tail) < r.minTailSeconds) {
+    out.push({ level: "info", text: `Only ${ms(e.tailSeconds)} of silence after the last sound: leave ~1 s so the next track or an ad doesn't crash in. Set Tail.`, knob: "edgeTailMs", suggest: r.tailMs - s.edgeTailMs });
+  }
+  return out;
+}
+
 function stereoHints(m: Report): Hint[] {
   const c = m.stereo.correlation;
   if (!Number.isFinite(c)) return [];
@@ -227,7 +277,7 @@ function referenceHints(m: Report, ref: Report, s: Settings): Hint[] {
 
 export function hints(input: HintInput): Hint[] {
   const { original, master, settings, bypass, reference } = input;
-  const out: Hint[] = [...settingHints(original, settings, bypass)];
+  const out: Hint[] = [...settingHints(original, settings, bypass), ...edgeHints(original, settings, bypass)];
   if (!master) {
     out.push({ level: "info", text: "Press m to measure the whole song; hints about loudness, peaks and tone need a full-song measurement." });
   } else {

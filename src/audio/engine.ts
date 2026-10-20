@@ -1,14 +1,17 @@
 /** Live playback: one song through the mastering chain, with loudness-matched A/B and per-module bypass. */
 import { LISTENS, LoudnessMatch, monitorGains } from "../master/monitor.ts";
 import type { Listen } from "../master/monitor.ts";
-import { clampParam, defaultSettings, noBypass } from "../master/settings.ts";
+import { contentBounds } from "../analysis/edges.ts";
+import { edgeAutomation } from "../dsp/edges.ts";
+import type { Bounds } from "../dsp/edges.ts";
+import { EDGE_KEYS, clampParam, defaultSettings, edgeParams, noBypass } from "../master/settings.ts";
 import type { Bypass, Module, ParamKey, Settings } from "../master/settings.ts";
 import type { Snapshot } from "../master/snapshot.ts";
 import { buildChain, loadWorklets } from "./chain.ts";
 import type { Chain } from "./chain.ts";
 import { REPORT_SECONDS } from "./messages.ts";
 import type { FromDynamics, FromMeter, MeterReading, ToMeter } from "./messages.ts";
-import { Transport } from "./transport.ts";
+import { Transport, startDelay } from "./transport.ts";
 import { Ring } from "../master/ring.ts";
 
 const SWITCH_SECONDS = 0.005;
@@ -22,8 +25,11 @@ export const SPECTRUM_BINS = FFT_SIZE / 2;
 const SILENT: MeterReading = { momentary: -Infinity, shortTerm: -Infinity, integrated: -Infinity, peak: -Infinity, truePeak: -Infinity, correlation: NaN, sideDb: NaN };
 
 /** The modules that turn the song down, and so have a GR meter. */
-export type Dynamics = Exclude<Module, "eq">;
+export type Dynamics = Exclude<Module, "eq" | "edges">;
 export const DYNAMICS: readonly Dynamics[] = ["multi", "comp", "limiter"];
+export function isDynamics(module: Module): module is Dynamics {
+  return (DYNAMICS as readonly Module[]).includes(module);
+}
 const DYNAMICS_NODE = { multi: "multiband", comp: "compressor", limiter: "limiter" } as const satisfies Record<Dynamics, keyof Chain>;
 
 /** Gain reduction now (dB); `bands` = the multiband's low, mid, high. */
@@ -61,6 +67,10 @@ export class Engine {
   readonly ctx: AudioContext;
   private readonly chain: Chain;
   private readonly wet: GainNode;
+  /** The Edges fades, on the master only (meters tap before it). */
+  private readonly edgeGain: GainNode;
+  /** Where the song's sound starts and stops (s). */
+  private edgeBounds: Bounds = { start: 0, end: 0 };
   private readonly dry: GainNode;
   private readonly refGain: GainNode;
   private readonly stereoOut: GainNode;
@@ -113,7 +123,8 @@ export class Engine {
     bus.connect(this.soloFilter).connect(this.soloGain).connect(monitor);
     this.wet = new GainNode(ctx, { gain: 1 });
     this.dry = new GainNode(ctx, { gain: 0 });
-    this.chain.master.connect(this.wet).connect(bus);
+    this.edgeGain = new GainNode(ctx, { gain: 1 });
+    this.chain.master.connect(this.edgeGain).connect(this.wet).connect(bus);
     this.chain.original.connect(this.dry).connect(bus);
     // Same latency as the main chain, so switching to the snapshot stays sample-aligned.
     this.snapChain = buildChain(ctx, this.settings, this.bypass);
@@ -272,8 +283,11 @@ export class Engine {
 
   async load(data: ArrayBuffer): Promise<void> {
     this.stopSource();
-    this.buffer = await this.ctx.decodeAudioData(data);
-    this.transport = new Transport(this.buffer.duration);
+    const buffer = await this.ctx.decodeAudioData(data);
+    this.buffer = buffer;
+    const { start, end } = contentBounds(Array.from({ length: buffer.numberOfChannels }, (_, c) => buffer.getChannelData(c)));
+    this.edgeBounds = { start: start / buffer.sampleRate, end: end / buffer.sampleRate };
+    this.transport = new Transport(buffer.duration);
     this.clearSnapshot();
     this.resetMeters();
     this.match.reset();
@@ -283,8 +297,12 @@ export class Engine {
 
   async play(): Promise<void> {
     if (!this.buffer || this.transport.playing) return;
+    const woke = this.ctx.state !== "running";
     await this.ctx.resume();
-    const from = this.transport.play(this.ctx.currentTime);
+    const leadIn = Math.max(0, edgeParams(this.settings, this.bypass).lead - this.edgeBounds.start);
+    const from = this.transport.play(this.ctx.currentTime, (f) => startDelay(f, woke, leadIn));
+    const at = this.transport.startTime;
+    this.scheduleEdges();
     const source = new AudioBufferSourceNode(this.ctx, { buffer: this.buffer });
     source.connect(this.chain.input);
     if (this.snapshot) source.connect(this.snapChain.input);
@@ -294,7 +312,6 @@ export class Engine {
       this.transport.pause(this.ctx.currentTime);
       this.onChange(this.state);
     };
-    const at = this.ctx.currentTime;
     source.start(at, from);
     this.source = source;
     if (this.refBuffer) {
@@ -309,7 +326,25 @@ export class Engine {
   pause(): void {
     this.transport.pause(this.ctx.currentTime);
     this.stopSource();
+    this.scheduleEdges();
     this.onChange(this.state);
+  }
+
+  /** Fades as gain automation from where the song is now; the master path is `latencySeconds` behind the source. */
+  private scheduleEdges(): void {
+    const gain = this.edgeGain.gain;
+    const now = this.ctx.currentTime;
+    gain.cancelScheduledValues(0);
+    if (!this.transport.playing) {
+      gain.setValueAtTime(1, now);
+      return;
+    }
+    const at = Math.max(now, this.transport.startTime);
+    const from = this.transport.position(at);
+    const { initial, curves } = edgeAutomation(from, this.edgeBounds, edgeParams(this.settings, this.bypass));
+    gain.setValueAtTime(initial, now);
+    const songStart = at + this.chain.latencySeconds - from;
+    for (const c of curves) gain.setValueCurveAtTime(c.values, songStart + c.at, c.duration);
   }
 
   async toggle(): Promise<void> {
@@ -329,6 +364,7 @@ export class Engine {
   set(key: ParamKey, value: number): number {
     this.settings[key] = clampParam(key, value);
     this.chain.apply(this.settings, this.bypass);
+    if ((EDGE_KEYS as readonly string[]).includes(key)) this.scheduleEdges();
     this.onChange(this.state);
     return this.settings[key];
   }
@@ -336,6 +372,7 @@ export class Engine {
   setAll(settings: Settings): void {
     this.settings = { ...settings };
     this.chain.apply(this.settings, this.bypass);
+    this.scheduleEdges();
     this.onChange(this.state);
   }
 
@@ -346,6 +383,7 @@ export class Engine {
   setBypass(bypass: Bypass): void {
     this.bypass = { ...bypass };
     this.chain.apply(this.settings, this.bypass);
+    this.scheduleEdges();
     this.onChange(this.state);
   }
 

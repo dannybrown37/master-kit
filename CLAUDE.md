@@ -21,7 +21,8 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
 - `src/analysis/`: meters (offline `loudness`/`truePeak`/`bandEnergies`/`stereoImage`, streaming `LiveLoudness`/`TruePeakMeter`/`LiveStereo`)
 - `src/dsp/`: `Compressor` (peak/RMS, sidechain HPF), `Limiter`, `Multiband` (`crossover.ts` = 3-band Linkwitz-Riley,
   bands sum flat; neutral = skipped bit-exact, on/off crossfades): per-sample DSP classes, run in the worklet and in Node tests;
-  `biquad.ts` = EQ magnitude response (matches `BiquadFilterNode.getFrequencyResponse` to 0.0000 dB)
+  `biquad.ts` = EQ magnitude response (matches `BiquadFilterNode.getFrequencyResponse` to 0.0000 dB);
+  `edges.ts` = lead-in/fades/tail (`applyEdges` for export, `edgeAutomation` for live gain curves)
 - `src/master/`: pure desk logic. `settings.ts` (every knob: range, default, module, `nudge`/`toFraction`/`formatParam`;
   `parseSettings` validates untrusted input), `monitor.ts` (A/B/reference gains, loudness match, which meters to show), `score.ts`,
   `hints.ts`, `explain.ts` (help text), `history.ts` (undo/redo), `snapshot.ts` (snapshot type + "what differs"),
@@ -87,7 +88,13 @@ snapshot compare (`c` save / `x` hear / `X` swap: a second `buildChain` fed by t
 short-term loudness like the original; `just render ... --live` checks it), session JSON files (header `session ▾`),
 multiband module (`multi`, between EQ and Compressor; modules are `MODULES` in signal order, so Tab goes EQ → Multiband →
 Compressor → Limiter; build bypass objects with `noBypass()`), auto-master (`A` / `just automaster`; the no-reference
-tonal target is `tiltedShares(ANALYSER_TILT_DB_PER_OCT)` in `spectrum.ts`; tests check its plans trip no hint warning).
+tonal target is `tiltedShares(ANALYSER_TILT_DB_PER_OCT)` in `spectrum.ts`; tests check its plans trip no hint warning),
+Edges module (`edges`, last in `MODULES`: lead-in, fade-in, fade-out, tail; `Report.edges` from `src/analysis/edges.ts`,
+sound = above -60 dBFS; fades start/stop at the sound, lead-in/tail count silence already there). Edges are applied
+only at Desk export and live (an `edgeGain` on the engine's master path, after the meters); never in `renderMaster`,
+so `settingsKey` ignores them and `just render/automaster --wav` stay raw chain output. Hint thresholds and auto-master
+values share `EDGE_RULES` (`hints.ts`). Playback from the top waits `PREROLL_SECONDS` (or the missing lead-in) so a
+waking audio device can't swallow the first hit (`startDelay` in `transport.ts`).
 `window.__engine` is exposed for probes: tap private nodes (e.g. `stereoOut`) with an AnalyserNode and compare
 output/input spectra at the same time (music changes too fast for before/after readings).
 
