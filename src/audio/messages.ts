@@ -1,7 +1,9 @@
 /** Messages between the main thread and the worklets in dynamics.worklet.ts. */
 import type { CompressorParams } from "../dsp/compressor.ts";
 import type { LimiterParams } from "../dsp/limiter.ts";
+import type { ColorParams } from "../dsp/color.ts";
 import type { MultibandParams } from "../dsp/multiband.ts";
+import type { TamerParams } from "../dsp/tamer.ts";
 
 export interface MeterReading {
   momentary: number;
@@ -19,9 +21,11 @@ export interface MeterReading {
 export type ToCompressor = { type: "params"; params: CompressorParams };
 export type ToLimiter = { type: "params"; params: LimiterParams };
 export type ToMultiband = { type: "params"; params: MultibandParams };
+export type ToTamer = { type: "params"; params: TamerParams };
+export type ToColor = { type: "params"; params: ColorParams };
 export type ToMeter = { type: "reset" };
 
-/** `bands`: the multiband's reduction per band (low, mid, high). */
+/** `bands`: reduction per band (multiband: low, mid, high; tamer: band 1, 2). */
 export type FromDynamics = { type: "reduction"; db: number; bands?: number[] };
 export type FromMeter = { type: "meter"; reading: MeterReading };
 

@@ -52,7 +52,7 @@ export function relativeGaps(bandsDb: readonly number[], targetDb: readonly numb
   return raw.map((g) => g - offset);
 }
 
-const FFT_SIZE = 8192;
+export const FFT_SIZE = 8192;
 
 const twiddleCache = new Map<number, [Float64Array, Float64Array]>();
 
@@ -110,7 +110,7 @@ export function fft(re: Float64Array, im: Float64Array): void {
  * Channels go through the FFT in pairs as re + i·im; for real inputs a and b,
  * |A[k]|² + |B[k]|² = (|X[k]|² + |X[N-k]|²) / 2, which is all we need.
  */
-function powerSpectrum(channels: Float32Array[]): Float64Array {
+export function powerSpectrum(channels: Float32Array[]): Float64Array {
   const window = Float64Array.from({ length: FFT_SIZE }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / FFT_SIZE));
   const power = new Float64Array(FFT_SIZE / 2 + 1);
   const re = new Float64Array(FFT_SIZE);
@@ -134,8 +134,8 @@ function powerSpectrum(channels: Float32Array[]): Float64Array {
   return power;
 }
 
-export function bandEnergies(channels: Float32Array[], sampleRate: number): BandEnergy[] {
-  const power = powerSpectrum(channels);
+/** `power` defaults to `powerSpectrum(channels)`; pass it in to reuse one. */
+export function bandEnergies(channels: Float32Array[], sampleRate: number, power = powerSpectrum(channels)): BandEnergy[] {
   const binHz = sampleRate / FFT_SIZE;
   const sums = BANDS.map((band) => {
     let sum = 0;

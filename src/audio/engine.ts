@@ -1,6 +1,6 @@
 /** Live playback: one song through the mastering chain, with loudness-matched A/B and per-module bypass. */
 import { LISTENS, LoudnessMatch, monitorGains } from "../master/monitor.ts";
-import type { Listen } from "../master/monitor.ts";
+import type { Listen, StreamDb } from "../master/monitor.ts";
 import { contentBounds } from "../analysis/edges.ts";
 import { edgeAutomation } from "../dsp/edges.ts";
 import type { Bounds } from "../dsp/edges.ts";
@@ -26,14 +26,14 @@ const SILENT: MeterReading = { momentary: -Infinity, shortTerm: -Infinity, integ
 
 /** The modules that turn the song down, and so have a GR meter. */
 export type Dynamics = Exclude<Module, "eq" | "edges">;
-export const DYNAMICS: readonly Dynamics[] = ["multi", "comp", "limiter"];
+export const DYNAMICS: readonly Dynamics[] = ["tame", "multi", "comp", "color", "limiter"];
 export function isDynamics(module: Module): module is Dynamics {
   return (DYNAMICS as readonly Module[]).includes(module);
 }
-const DYNAMICS_NODE = { multi: "multiband", comp: "compressor", limiter: "limiter" } as const satisfies Record<Dynamics, keyof Chain>;
+const DYNAMICS_NODE = { tame: "tamer", multi: "multiband", comp: "compressor", color: "color", limiter: "limiter" } as const satisfies Record<Dynamics, keyof Chain>;
 
-/** Gain reduction now (dB); `bands` = the multiband's low, mid, high. */
-export type Reduction = Record<Dynamics, number> & { bands: number[] };
+/** Gain reduction now (dB); `bands` = per band, for the modules that have bands (multiband: low, mid, high; tamer: 1, 2). */
+export type Reduction = Record<Dynamics, number> & { bands: Partial<Record<Dynamics, number[]>> };
 
 export interface EngineState {
   playing: boolean;
@@ -61,6 +61,8 @@ export interface EngineState {
   snapshotKnobs: Snapshot | null;
   /** Gain on the snapshot so it matches the master's loudness. */
   snapshotDb: number;
+  /** Streaming preview gains, or null (comparisons loudness-matched). */
+  stream: StreamDb | null;
 }
 
 export class Engine {
@@ -83,6 +85,7 @@ export class Engine {
   private refBuffer: AudioBuffer | null = null;
   private refSource: AudioBufferSourceNode | null = null;
   private referenceDb = 0;
+  private stream: StreamDb | null = null;
   private readonly refIn: GainNode;
   private readonly meters: Record<Listen, AudioWorkletNode>;
   private readonly analysers: Record<Listen, AnalyserNode>;
@@ -98,7 +101,7 @@ export class Engine {
   private bypass: Bypass = noBypass();
   private listen: Listen = "master";
   private readings: Record<Listen, MeterReading> = { original: SILENT, master: SILENT, reference: SILENT, snapshot: SILENT };
-  private reduction: Reduction = { multi: 0, comp: 0, limiter: 0, bands: [0, 0, 0] };
+  private reduction: Reduction = { tame: 0, multi: 0, comp: 0, color: 0, limiter: 0, bands: {} };
   /** Gain reduction (dB) every REPORT_SECONDS while playing, the last GR_HISTORY_SECONDS. */
   readonly grHistory = Object.fromEntries(DYNAMICS.map((m) => [m, new Ring(GR_HISTORY_SECONDS / REPORT_SECONDS)])) as Record<Dynamics, Ring>;
   /** Called whenever meters or transport change. */
@@ -131,7 +134,7 @@ export class Engine {
     this.snapGain = new GainNode(ctx, { gain: 0 });
     this.snapChain.master.connect(this.snapGain).connect(bus);
     // A port nobody listens to queues its GR reports forever; a handler starts it so they are dropped.
-    for (const node of [this.snapChain.multiband, this.snapChain.compressor, this.snapChain.limiter]) node.port.onmessage = (): void => {};
+    for (const module of DYNAMICS) this.snapChain[DYNAMICS_NODE[module]].port.onmessage = (): void => {};
     this.refGain = new GainNode(ctx, { gain: 0 });
     this.refGain.connect(bus);
     this.refIn = new GainNode(ctx, { channelCount: 2, channelCountMode: "explicit" });
@@ -149,7 +152,7 @@ export class Engine {
     for (const module of DYNAMICS) {
       this.chain[DYNAMICS_NODE[module]].port.onmessage = (ev: MessageEvent<FromDynamics>): void => {
         this.reduction[module] = ev.data.db;
-        if (ev.data.bands) this.reduction.bands = ev.data.bands;
+        if (ev.data.bands) this.reduction.bands[module] = ev.data.bands;
         if (this.transport.playing) this.grHistory[module].push(ev.data.db);
       };
     }
@@ -186,7 +189,7 @@ export class Engine {
       original: this.readings.original,
       master: this.readings.master,
       reference: this.readings.reference,
-      reduction: { ...this.reduction, bands: [...this.reduction.bands] },
+      reduction: { ...this.reduction, bands: { ...this.reduction.bands } },
       hasReference: this.refBuffer !== null,
       referenceDb: this.referenceDb,
       mono: this.mono,
@@ -194,6 +197,7 @@ export class Engine {
       snapshot: this.readings.snapshot,
       snapshotKnobs: this.snapshot && { settings: { ...this.snapshot.settings }, bypass: { ...this.snapshot.bypass } },
       snapshotDb: this.snapMatch.db,
+      stream: this.stream,
     };
   }
 
@@ -271,6 +275,13 @@ export class Engine {
   setReferenceMatch(db: number): void {
     this.referenceDb = db;
     this.applyMonitor();
+  }
+
+  /** Streaming preview: every source plays at the platform's gain for it (null = back to loudness-matched). */
+  setStream(stream: StreamDb | null): void {
+    this.stream = stream && { ...stream };
+    this.applyMonitor();
+    this.onChange(this.state);
   }
 
   toggleReference(): void {
@@ -423,7 +434,7 @@ export class Engine {
   }
 
   private applyMonitor(): void {
-    const { wet, dry, ref, snap } = monitorGains(this.listen, { original: this.match.db, reference: this.referenceDb, snapshot: this.snapMatch.db });
+    const { wet, dry, ref, snap } = monitorGains(this.listen, { original: this.match.db, reference: this.referenceDb, snapshot: this.snapMatch.db }, this.stream);
     const at = this.ctx.currentTime;
     this.wet.gain.setTargetAtTime(wet, at, SWITCH_SECONDS);
     this.dry.gain.setTargetAtTime(dry, at, SWITCH_SECONDS);

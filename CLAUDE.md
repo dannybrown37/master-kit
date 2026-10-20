@@ -10,11 +10,13 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
   Songs come from `MUSIC_DIR` (default `../deluge-quest/web/public/audio`).
 - `just analyze <file> [--json]`: metrics report for one song (ffmpeg decodes to f32 PCM)
 - `just crosscheck [files...]`: our meters vs `ffmpeg -af ebur128=peak=true`; no args = EBU synthetic cases
-- `just render <track> [--set JSON] [--bypass eq,multi,comp,limiter] [--wav FILE] | --live S`: runs the real browser
-  chain in headless Chrome (starts its own Vite) and prints before/after plus a null test. The way to verify
-  audio-engine changes from WSL. `tools/chrome.ts` has the CDP helpers (also for screenshots).
-- `just automaster <track> [--ref <track>] [--wav FILE] [--session FILE] [--json]`: auto-master in headless Chrome
-  (page route `/?auto=1`, same `autoMaster()` as the Desk's `A`); prints the reasons, knobs and before/after.
+- `just render <track> [--set JSON] [--bypass eq,tame,multi,comp,color,limiter] [--wav FILE] | --live S`: runs the real browser
+  chain in headless Chrome (starts its own Vite) and prints before/after plus a null test (bypass every module for a
+  bit-exact −144 dB). The way to verify audio-engine changes from WSL. `tools/chrome.ts` has the CDP helpers (also for screenshots).
+- `just automaster <track> [--ref <track>] [--genre KEY] [--wav FILE] [--session FILE] [--json]`: auto-master in headless Chrome
+  (page route `/?auto=1[&genre=]`, same `autoMaster()` as the Desk's `A`); prints the reasons, knobs and before/after.
+- `just album <track>... | --all [--out DIR] [--bits 24|16] [--genre KEY]`: the `/?auto=1` route per song, then
+  `applyEdges` + `encodeWav` in Node; numbered WAVs + loudness spread.
 
 ## Layout
 
@@ -22,17 +24,22 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
 - `src/dsp/`: `Compressor` (peak/RMS, sidechain HPF), `Limiter`, `Multiband` (`crossover.ts` = 3-band Linkwitz-Riley,
   bands sum flat; neutral = skipped bit-exact, on/off crossfades): per-sample DSP classes, run in the worklet and in Node tests;
   `biquad.ts` = EQ magnitude response (matches `BiquadFilterNode.getFrequencyResponse` to 0.0000 dB);
-  `edges.ts` = lead-in/fades/tail (`applyEdges` for export, `edgeAutomation` for live gain curves)
+  `edges.ts` = lead-in/fades/tail (`applyEdges` for export, `edgeAutomation` for live gain curves);
+  `tamer.ts` = 2 dynamic resonance cuts (narrow vs wide band-pass detector); `color.ts` = warmth + soft clip,
+  2x oversampled by `oversample.ts` (half-band FIR, fixed `COLOR_LATENCY` = 47 samples even when off)
 - `src/master/`: pure desk logic. `settings.ts` (every knob: range, default, module, `nudge`/`toFraction`/`formatParam`;
   `parseSettings` validates untrusted input), `monitor.ts` (A/B/reference gains, loudness match, which meters to show), `score.ts`,
   `hints.ts`, `explain.ts` (help text), `history.ts` (undo/redo), `snapshot.ts` (snapshot type + "what differs"),
   `session.ts` (session JSON file: `parseSession` validates untrusted input), `automaster.ts` (pure planner: Report
-  [+ reference] → settings + a reason per move; `easeDynamics`)
+  [+ reference, genre, taste] → settings + a reason per move; `easeDynamics`), `genres.ts` (profiles + `genreFromName`),
+  `shootout.ts` (gentle/balanced/punchy variants, taste), `streaming.ts`, `album.ts`
 - `src/audio/`: Web Audio glue. `chain.ts` builds the graph for AudioContext or OfflineAudioContext,
   `engine.ts` is live playback (+ reference, mono check, snapshot chain), `render.ts` offline full-song, `drill-render.ts` drill clips,
   `measure.ts` runs `analyze()` in `analysis.worker.ts`, `dynamics.worklet.ts` hosts the DSP classes and meters,
   `sample-rate.ts` reads a file's own rate from its header (mp3/WAV/FLAC), `auto.ts` = render loops (`driveForTarget`
-  for `l`, `autoMaster` = plan → Drive → ease once if dynamics fail)
+  for `l`, `autoMaster` = plan → Drive → ease once if dynamics fail, `shootout` = three styles each rendered to −14),
+  `tracks.ts` (`fetchTrack`)
+- `src/album/view.ts`: the Album tab (batch auto-master, loudness spread, join previews, export in order)
 - `src/desk/`: the UI (plain DOM, no framework). `desk.ts` (Desk class, keys, render at rAF), `nav.ts` (pure
   knob selection), `dom.ts` helpers, `storage.ts` (localStorage, always read back through a validator)
 - `src/drills/`: `drills.ts` (pure: levels, questions, progress, loudness match), `player.ts`, `view.ts`
@@ -63,7 +70,7 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
   The mobile PNG must be 780 px wide (390 @2x); wider means something overflows the phone screen.
   Desk panels that re-render at 10 Hz must not rebuild clickable children every frame (see the hints signature).
 - Export changes: `just export <track> [--bits 16]` (downloads through the real button, checks with ffprobe + ebur128).
-- Comparisons between A/B, reference and drill clips are always loudness-matched; keep it that way.
+- Comparisons between A/B, reference and drill clips are always loudness-matched; keep it that way (only the streaming preview `p` unmatches them, on purpose).
 - `out/` is scratch output (gitignored).
 
 ## Plan
@@ -94,16 +101,29 @@ sound = above -60 dBFS; fades start/stop at the sound, lead-in/tail count silenc
 only at Desk export and live (an `edgeGain` on the engine's master path, after the meters); never in `renderMaster`,
 so `settingsKey` ignores them and `just render/automaster --wav` stay raw chain output. Hint thresholds and auto-master
 values share `EDGE_RULES` (`hints.ts`). Playback from the top waits `PREROLL_SECONDS` (or the missing lead-in) so a
-waking audio device can't swallow the first hit (`startDelay` in `transport.ts`).
+waking audio device can't swallow the first hit (`startDelay` in `transport.ts`). Streaming preview (`p` cycles
+Spotify → Apple Music → YouTube → off; `src/master/streaming.ts` = platform rules + `playbackGainDb`): every source
+plays at its own platform gain instead of loudness-matched (`monitorGains(..., stream)`), the one deliberate exception
+to matched comparisons. The master's gain is exact from a current measurement, else live ≈ (original + A/B match);
+the Full-song check lists each platform's gain. Apple's turn-down-only behavior is from secondary sources.
+Tamer (`tame`, after EQ) and Color (`color`, before the limiter) modules; `MODULES` = eq, tame, multi, comp, color,
+limiter, edges. `Report.resonances` (`src/analysis/resonance.ts`): hints/auto-master act only on 1.5–8 kHz
+(`TAME_RULES`; lower peaks are mostly the song's notes). Color's clip threshold is relative to the limiter's
+(ceiling − Drive + "Clip above"). Genre profiles feed auto-master; the blind shootout (`v`) stores pick counts
+(`loadTaste`) and `tasteLean` blends later plans toward gentle/punchy. Tests check every genre × case × style plan
+trips no hint warning. Album tab + `just album`. Style: warm graphite + one amber accent, IBM Plex (self-hosted
+woff2 in `src/desk/fonts/`, OFL); colors and the 4 px spacing scale are tokens in `desk.css`, chart series are
+`--series-*` (canvases read them), so never hard-code a hex in TS.
 `window.__engine` is exposed for probes: tap private nodes (e.g. `stereoOut`) with an AnalyserNode and compare
 output/input spectra at the same time (music changes too fast for before/after readings).
 
-Perf: a render of a 3 min song takes ~4 s in headless Chrome (~5.5 s with the multiband active); auto-master ~35 s. DSP speed-ups must stay bit-identical; compare old vs
+Perf: a render of a 3 min song takes ~4.5 s in headless Chrome (+~1 s multiband, +~1.5 s color, +~0.5 s tamer);
+auto-master ~35 s, a shootout ~35 s, `just album` ~23 s per song. DSP speed-ups must stay bit-identical; compare old vs
 new on a real song (copy the old class into `out/`, process the same PCM through both, count differing samples).
 Memory: the Desk keeps only the master of a render (`MasterAudio`); `l` keeps only its closest render.
 
 Hints must not contradict each other: a suggestion stops short of what another hint warns about (width < 150%,
 EQ within ±5.5 dB); tests apply each suggestion and check no warning appears.
 
-Ideas not built: multiband presets / drills, auto-master genre targets (EDM is meant to be sub-heavy; without a
-reference the generic target trims it).
+Ideas not built: multiband presets / drills, codec check (AAC/Opus encode + true peak via WebCodecs), small-speaker
+simulation, color/clipper drills, genre profiles measured from real references instead of rules of thumb.

@@ -5,7 +5,9 @@ Mastering only: no stems, so no mixing.
 
 Status: **all 6 steps built**: analysis core, audio engine, Desk UI, WAV export, drills, hints + reference comparison;
 since then a live spectrum with a draggable EQ, band solo, GR history, presets, one-key loudness matching (`l`),
-a self-ticking checklist, undo, snapshot compare, session files, a multiband compressor and auto-master (UI and CLI).
+a self-ticking checklist, undo, snapshot compare, session files, a multiband compressor and auto-master (UI and CLI);
+then a resonance tamer, color (saturation + soft clip), edges (lead-in, fades, tail), genre-aware auto-master,
+a blind shootout that learns your taste, a streaming preview and an album mode (UI and CLI).
 
 ## Commands
 
@@ -18,7 +20,8 @@ just crosscheck [files...]       # our meters vs ffmpeg ebur128 (no args: EBU te
 just render "<track>" --set '{"limDrive":3}' --wav out/x.wav   # master in headless Chrome, before/after table
 just render "<track>" --live 8   # drive the realtime Desk with keys (A/B, bypass, knob)
 just export "<track>" [--set JSON] [--bits 16]   # press "export" in headless Chrome, check the WAV with ffmpeg
-just automaster "<track>" [--ref "<track>"] [--wav out/x.wav] [--session out/x.json] [--json]   # auto-master, with reasons; no track = fzf pick
+just automaster "<track>" [--ref "<track>"] [--genre edm] [--wav out/x.wav] [--session out/x.json] [--json]   # auto-master, with reasons; no track = fzf pick
+just album "<track>"... | --all [--out DIR] [--bits 16] [--genre KEY]   # auto-master several, numbered WAVs with edges + loudness spread
 just shot ["<track>"] [--play S] [--keys Tab,m] [--query drills=1] [--name x]   # screenshots: out/x-{desktop,mobile}.png
 ```
 
@@ -28,15 +31,17 @@ Songs come from `MUSIC_DIR` (default `../deluge-quest/web/public/audio`); the ap
 ## The Desk
 
 ```
-┌ MASTER KIT [Desk|Drills] [song ▾] [file]   [reference ▾] [file] [preset ▾] [auto-master] [session ▾] ┐
-│ ▶ 0:31 / 3:11 ━━━━━━━━━  MASTER  [A/B] [Ref] [Mono] [snap] [vs snap] [measure song] [export WAV]  │
+┌ MASTER KIT [Desk|Drills|Album] [song ▾] [file]                                                       ┐
+│ [reference ▾] [file] [genre ▾] [preset ▾] [auto-master] [shootout] [session ▾]                       │
+│ ▶ 0:31 / 3:11 ━━━━━━━━  MASTER  [A/B] [Ref] [Mono] [streaming] [snap] [vs snap] [measure] [export]  │
 ├ EQ ───────────┬ Multiband ───────┬ Compressor ────┬ Meters ───────────────────────────────────────┤
 │ > Low freq    │ Low/Mid/High     │ Threshold ...  │ Momentary / Short-term / Integrated (LUFS)    │
 │   Low gain    │   threshold+gain │ GR ▇ ▀█▀▀ 10 s │   ░target zone -15..-13░  | = original        │
-│   ...         │ Splits · Ratio   ├ Limiter ───────┤ True peak (dBTP)  ┃-1 limit                    │
-│ Width · Mono  │ Attack · Release │ Drive          │ Correlation · Side/mid · live score           │
-│   bass · Side │ Low/Mid/High GR  │ Ceiling        │                                               │
-│   air gain    │ ▀█▀▀█▀ last 10 s │ GR ▇ ▀▀█▀ 10 s │                                               │
+│   ...         │ Splits · Ratio   ├ Color ─────────┤ True peak (dBTP)  ┃-1 limit                    │
+│ Width · Mono  │ Attack · Release │ Warmth · Clip  │ Correlation · Side/mid · live score           │
+│   bass · Side │ Low/Mid/High GR  ├ Limiter ───────┼ Edges ────────────────────────────────────────┤
+├ Tamer ────────┤ ▀█▀▀█▀ last 10 s │ Drive · Ceiling│ Lead-in · Fade-in · Fade-out · Tail           │
+│ 2 bands · Q   │                  │ GR ▇ ▀▀█▀ 10 s │                                               │
 ├ Spectrum & EQ: live spectrum (bars = what you hear, line = comparison, loudness-matched) + EQ curve ┤
 ├ Checklist (ticks itself) ───────────┬ Full-song check: score /100, original · master · Δ · reference┤
 │ Hints (click to apply) · Explain (?)│ loudness 40 · peaks 30 · dynamics 30; loudness-over-time plot; │
@@ -56,8 +61,10 @@ Songs come from `MUSIC_DIR` (default `../deluge-quest/web/public/audio`); the ap
 | `m` | measure: render the whole song offline and score it (reused until a knob changes) |
 | `l` | set limiter Drive so the full-song master hits −14 LUFS (renders 1–4 times, ~5 s each) |
 | `A` | auto-master: plan every module from the song's measurements (and the reference), set Drive by rendering; `u` undoes it |
+| `v` | blind shootout: three versions of the auto-master (gentle / balanced / punchy) at −14 LUFS in a random order, knobs hidden; `1` `2` `3` switch, Enter picks, Esc cancels |
 | `h` | apply the top hint's suggestion |
 | `o` | mono check: everything you hear summed to mono (phone speaker, club PA) |
+| `p` | streaming preview: off → Spotify → Apple Music → YouTube; every song plays at that platform's level |
 | `c` / `x` / `X` | snapshot: save the current knobs · flip between the snapshot and your knobs (loudness-matched) · swap them (`u` undoes) |
 | `s` | solo the selected EQ band: hear only its frequencies (+6 dB), follows the band as you move it; finds mud fast |
 | `e` / `E` | export WAV, 24-bit / 16-bit with TPDF dither, at the song file's own sample rate |
@@ -72,6 +79,22 @@ song into low, mid and high, each with its own compressor and gain. Every band s
 with all bands off and at 0 dB the module is skipped entirely, bit for bit. Lower one band's threshold to tame only that
 range when it gets loud: a boomy bass note, harsh cymbals. Each band has its own GR meter.
 
+**Tamer** (after the EQ): two dynamic bell cuts for resonances. Each band compares a narrow slice around its
+frequency with the wider neighbourhood and cuts (up to Depth) only while the slice sticks out more than a smooth
+spectrum would let it, so a harsh partial is turned down on the notes where it rings and nowhere else. The full-song
+measurement finds candidates (narrow humps that stand above the spectrum on both sides); hints and auto-master only act
+on 1.5–8 kHz, because lower peaks are usually the song's own notes (auto-master names them, e.g. "392 Hz (G4)").
+
+**Color** (between Compressor and Limiter): Warmth (tanh saturation mixed in: quiet parts stay clean, loud parts gain
+odd harmonics) and a soft clipper set "Clip above" the limiter's threshold, so the sharpest peaks are clipped before
+the limiter has to duck them. Both run 2x oversampled (half-band FIR, ~80 dB) so the distortion doesn't alias; the
+module always adds its fixed 47-sample delay, so A/B stays sample-aligned whether it's on or off.
+
+**Edges** (last): lead-in silence, fade-in, fade-out and tail, counted from where the sound starts and stops (above
+−60 dBFS) and including silence already in the file. Applied to the export and heard live (fades, and lead-in from the
+top); never part of the full-song render, so they don't cost a new measurement. Playback from the top waits 100 ms
+(or the lead-in) so a waking audio device can't swallow the first hit.
+
 **Auto-master** (`A`, or the header button; CLI: `just automaster`): a first master planned from the song's own
 measurements, with a reason for every knob (listed in Hints). Tone is compared with the reference, or without one a
 spectrum that reads flat on the 4.5 dB/oct analyser: EQ fixes half of each gap ≥ 2 dB (at most 2 dB, 3 with a reference;
@@ -80,6 +103,22 @@ goes mono below 100 Hz, width follows the reference (70–130%), gentle glue com
 (PLR < 9), ceiling −1 dBTP. Then it renders to set Drive for −14 LUFS, and if the dynamics score fails it eases the
 compression once and renders again. It's a starting point to A/B, not a verdict. The CLI runs the same code in headless
 Chrome and can write the WAV and a session file to load in the Desk.
+It is **genre-aware** (header `genre ▾`; default from the `[year, genre]` tag in the file name, e.g. `[2025, edm]`):
+each style shifts the tonal target (EDM keeps a big sub, lo-fi a dark top), decides glue (ambient, cinematic and
+acoustic keep their dynamics), warmth, soft clipping and mono bass (`src/master/genres.ts`; rules of thumb, a reference
+overrides the tone). It also aims the Tamer at harsh resonances and sets Edges. Your **shootout picks** lean it toward
+gentle or punchy (`tasteLean`: (punchy − gentle) / (picks + 2)).
+
+**Streaming preview** (`p`): each source plays at the gain a platform would give it on playback, instead of being
+loudness-matched: Spotify −14 LUFS (quiet songs turned up only until their peaks reach −1 dBTP, per
+[Spotify](https://support.spotify.com/us/artists/article/loudness-normalization/)), Apple Music −16 and YouTube −14
+(turn-down only; Apple's behaviour is from secondary sources). The full-song check lists each platform's gain for the
+original, master and reference.
+
+**Album** (tab; CLI `just album`): pick songs in play order, auto-master them all (genre per name, your taste), see the
+loudness spread (songs > 1 LU off the median are flagged), play each join (last 8 s of one song with its fade-out and
+tail into the first 8 s of the next with its lead-in), and export numbered WAVs in order (Chrome: into a folder you
+pick). Each song's knobs are saved, so `desk` opens it ready to tweak.
 
 **Snapshot compare**: `c` saves the knobs; keep tweaking, then `x` flips between the two candidate masters, sample-aligned
 and turned to the same loudness, so you judge the processing, not the level. The snapshot runs on a second copy of the
@@ -99,7 +138,7 @@ mono check, export), ticked automatically from what you've listened to and measu
 **GR history**: under each GR meter, the last 10 s of gain reduction while playing. Regular deep dips on every kick
 mean the compressor is pumping.
 
-**Loudness over the song** (full-song check): short-term loudness of the original (yellow) and the measured master (blue)
+**Loudness over the song** (full-song check): short-term loudness of the original (blue) and the measured master (amber)
 across the whole song, the target zone shaded and the reference's integrated loudness dashed. Click it to seek.
 
 **Score** (full song): loudness 40 (−14 LUFS ±1, falling to 0 at 4 LU off), true peak 30 (≤ −1 dBTP, 0 at 0 dBTP),
@@ -110,6 +149,8 @@ EQ ≥ 6 dB, width ≥ 150%, idle compressor), compressor ducking the sub (sub �
 with the sidechain HPF off: suggests ~100 Hz), stereo (correlation below 0 cancels in mono; below 0.2 is very wide),
 and with a reference: the up-to-3 bands that differ most after removing the median gap (band levels are shares of
 the total, so one heavy band would otherwise make all others look light), and width vs the reference's side/mid.
+Before any measurement: edges (a song that hits on its first sample, a hard cut at the end, < 0.5 s of tail), harsh
+resonances for the Tamer, and overdone color (warmth > 50%, clip < +1.5 dB) or tamer depth (> 8 dB).
 
 ## Drills (`d`)
 
@@ -125,10 +166,11 @@ and with peaks ≤ −1 dBFS, looping in sync. Flip with `a`, answer with `1`–
 ## Signal chain
 
 ```
-song ─┬─► EQ: low shelf · mud · presence · air shelf ─► width ─► compressor ─► limiter ─► master ─┐
-      │                                                       (sidechain HPF)                    ├─► stereo / mono ─► speakers
-      ├─► delay (limiter latency) ─► × match gain ───────────────────────────────► original ─────┤
-reference (synced, looped) ─► × match gain ──────────────────────────────────────► reference ────┘
+song ─┬─► EQ ─► width ─► tamer ─► multiband ─► compressor ─► color ─► limiter ─► master ─► edge fades ─┐
+      │                                                                                                ├─► stereo / mono ─► speakers
+      ├─► delay (color + limiter latency) ─► × match gain ───────────────────────────► original ──────┤
+reference (synced, looped) ─► × match gain ──────────────────────────────────────────► reference ─────┘
+                        (streaming preview: platform gains instead of match gains)
 ```
 
 - **Width** (mid/side stage, part of the EQ module): scales the side (L−R) and leaves the mid (L+R) alone;
@@ -150,6 +192,8 @@ reference (synced, looped) ─► × match gain ──────────�
 | True peak (4x oversampled below 96 kHz) | ITU-R BS.1770-4 Annex 2 |
 | Crest, PLR, tonal balance (6 bands, share of energy) | |
 | Stereo correlation, side vs mid (dB) | |
+| Edges: silence before/after the sound, level of its first/last 10 ms | |
+| Resonances: 1/12-octave humps above both neighbours (150 Hz–8 kHz) | |
 
 Streaming targets: −14 LUFS ±1 integrated, true peak ≤ −1 dBTP.
 

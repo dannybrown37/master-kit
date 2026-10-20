@@ -51,6 +51,10 @@ shot *args:
 render *args:
     @node tools/render.ts "$@"
 
-# Auto-master a MUSIC_DIR track in headless Chrome: just automaster <track> [--ref <track>] [--wav FILE] [--session FILE] [--json]
+# Auto-master several songs alike and write numbered WAVs (with Edges): just album <track>... | --all [--out DIR] [--bits 24|16] [--genre KEY]
+album *args:
+    @node tools/album.ts "$@"
+
+# Auto-master a MUSIC_DIR track in headless Chrome: just automaster <track> [--ref <track>] [--genre KEY] [--wav FILE] [--session FILE] [--json]
 automaster *args:
     @node tools/automaster.ts "$@"

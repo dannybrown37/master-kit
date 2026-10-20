@@ -3,6 +3,9 @@ import type { Module, ParamKey } from "./settings.ts";
 
 export const MODULE_HELP: Record<Module, string> = {
   eq: "EQ: small, broad moves fix tonal balance. In mastering ±1–2 dB is a lot; if you need ±6, the mix needs fixing. Stereo width lives here too.",
+  tame: "Tamer: two dynamic cuts that turn a narrow slice down only while it rings out of the spectrum around it (a harsh synth partial, a whistling resonance). Narrower and more surgical than the multiband; it does nothing on a smooth spectrum. Start with Depth 3–4 dB and A/B.",
+  color:
+    "Color: warmth (tape-style saturation: loud parts gain a little harmonic grit and round over) and a soft clipper that shaves the sharpest peaks before the limiter. Clipping brief transients sounds cleaner than limiting them hard, so the master gets louder with less pumping. Both run 2x oversampled.",
   multi:
     "Multiband: three compressors, each on its own slice of the spectrum (low, mid, high). It tames one range only when it gets loud: a booming bass note or a harsh cymbal, without touching the rest. Every band starts off; lower a band's threshold until its GR moves.",
   comp: "Compressor: turns loud moments down so the song feels denser. Watch the GR meter: 1–3 dB is typical glue for a master.",
@@ -26,6 +29,15 @@ export const PARAM_HELP: Record<ParamKey, string> = {
   eqSideAirGain:
     "Mid/side EQ: a high shelf on the side signal only, at the air shelf's frequency. +1–3 dB adds shimmer to the stereo edges (reverbs, hats, pads) without making the vocal or snare in the centre harsher.",
   eqWidth: "Turns the side (L−R: what differs between speakers) up or down; the centre stays put. 100% = untouched, 0% = mono. Past ~130% things start to sound phasey and fall apart in mono (o).",
+  tameFreq1: "Where band 1 listens and cuts. Harshness usually lives at 2–6 kHz; sweep it while listening with Depth up to find the ringing spot.",
+  tameDepth1: "The most band 1 may cut, only while its slice sticks out. 2–4 dB is gentle; past 6 dB the sound can get hollow. Off = band unused.",
+  tameFreq2: "Where band 2 listens and cuts: often a boxy or boomy spot at 200–600 Hz, or a second harsh one.",
+  tameDepth2: "The most band 2 may cut. Low-mid peaks are often the song's own notes: cut gently and A/B.",
+  tameQ: "How narrow both cuts are. 3–5 catches a resonance without dulling its neighbours; lower is broader and more audible.",
+  colorWarmth:
+    "Tape-style saturation: quiet parts stay clean, loud parts bend over and gain a little harmonic grit. 10–30% adds density and glue; much more sounds fuzzy. A/B at matched loudness: saturation also tames peaks.",
+  colorClipDb:
+    "A soft clipper before the limiter, set this far above the limiter's threshold: peaks that would need more than this much limiting are clipped first. +2–3 dB takes only the sharpest drum hits; lower clips more. Too low sounds crunchy. Off at +6.",
   mbLowThreshold: "Where the low band (kick, bass, sub) starts being turned down. Off = never. Lower it until the low GR shows 2–4 dB on the boomiest notes.",
   mbLowGain: "Static level of the low band after compression: like a low shelf, but with a steep, phase-coherent split.",
   mbMidThreshold: "Where the mid band (vocals, guitars, snare body) starts being turned down. Usually left off in mastering.",

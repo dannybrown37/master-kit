@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { ANALYSER_TILT_DB_PER_OCT, tiltedShares } from "../analysis/spectrum.ts";
 import type { Report } from "../analysis/report.ts";
 import { easeDynamics, planMaster } from "./automaster.ts";
+import { GENRES } from "./genres.ts";
+import { applyTaste } from "./shootout.ts";
+import type { GenreKey } from "./genres.ts";
 import { hints } from "./hints.ts";
 import { defaultSettings, parseSettings } from "./settings.ts";
 import { report } from "./test-report.ts";
@@ -86,15 +89,71 @@ describe("planMaster", () => {
     expect(steps.some((x) => x.startsWith("Edges:"))).toBe(want.some((v) => v > 0));
   });
 
-  it.each(CASES)("%s: every value is a legal knob setting",(_name, original, reference) => {
-    const { settings } = planMaster({ original, reference });
+  const EVERY: [string, Report, Report | null, GenreKey][] = CASES.flatMap(([name, o, ref]) => GENRES.map((g): [string, Report, Report | null, GenreKey] => [`${name} as ${g.key}`, o, ref, g.key]));
+
+  it.each(EVERY)("%s: every value is a legal knob setting", (_name, original, reference, genre) => {
+    const { settings } = planMaster({ original, reference, genre });
     expect(parseSettings(settings)).toEqual(settings);
   });
 
-  it.each(CASES)("%s: the hints have nothing to warn about in the plan's settings", (_name, original, reference) => {
-    const { settings, bypass } = planMaster({ original, reference });
+  it.each(EVERY)("%s: the hints have nothing to warn about in the plan's settings", (_name, original, reference, genre) => {
+    const { settings, bypass } = planMaster({ original, reference, genre });
     const warnings = hints({ original, master: null, settings, bypass }).filter((h) => h.level === "warn" || h.level === "bad");
     expect(warnings).toEqual([]);
+  });
+
+  describe("genres", () => {
+    it("EDM: the sub may stay big, kick peaks go to the clipper, bass mono from 120 Hz", () => {
+      const song = report({}, tilted({ 0: 5 }));
+      expect(planMaster({ original: song }).settings.eqLowGain).toBeLessThan(0);
+      const { settings: s, steps } = planMaster({ original: song, genre: "edm" });
+      expect(s.eqLowGain).toBe(0);
+      expect([s.colorClipDb, s.colorWarmth, s.eqMonoBassHz]).toEqual([2.5, 15, 120]);
+      expect(steps[0]).toMatch(/^Genre: EDM/);
+    });
+
+    it("lo-fi: a dark top is the style, so a balanced song's air gets trimmed, and warmth goes on", () => {
+      const { settings: s } = planMaster({ original: report({}, tilted()), genre: "lofi" });
+      expect(s.eqAirGain).toBeLessThan(0);
+      expect(s.colorWarmth).toBe(35);
+      expect(s.colorClipDb).toBe(6);
+    });
+
+    it.each(["cinematic", "ambient", "acoustic"] as const)("%s: no glue compression even with lots of dynamics", (genre) => {
+      const { settings: s, steps } = planMaster({ original: report({ plr: 15 }, tilted()), genre });
+      expect(s.compThreshold).toBe(defaultSettings().compThreshold);
+      expect(steps.join(" ")).toMatch(/Compressor: off/);
+    });
+
+    it("a reference beats the genre's tonal target", () => {
+      const song = report({}, tilted({ 0: 3 }));
+      expect(planMaster({ original: song, reference: song, genre: "lofi" }).settings.eqAirGain).toBe(0);
+    });
+  });
+
+  it.each([
+    [0.6, "punchy"],
+    [-0.6, "gentle"],
+  ] as const)("taste %d leans the plan toward %s and says so", (taste, style) => {
+    const plain = planMaster({ original: report({}, tilted()), genre: "edm" });
+    const leaned = planMaster({ original: report({}, tilted()), genre: "edm", taste });
+    expect(leaned.settings).toEqual(applyTaste(plain.settings, taste));
+    expect(leaned.steps.join(" ")).toMatch(new RegExp(`Taste: .*${style}`));
+  });
+
+  describe("tamer", () => {
+    it("aims band 1 and 2 at the two harshest resonances", () => {
+      const original = report({ resonances: [{ hz: 6700, prominenceDb: 7.7 }, { hz: 2800, prominenceDb: 6 }, { hz: 4000, prominenceDb: 5.5 }] });
+      const { settings: s, steps } = planMaster({ original });
+      expect([s.tameFreq1, s.tameDepth1, s.tameFreq2, s.tameDepth2]).toEqual([6700, 4, 2800, 4]);
+      expect(steps.join(" ")).toMatch(/Tamer: .*6\.7 kHz/);
+    });
+
+    it("names low peaks as probable notes and leaves them alone", () => {
+      const { settings: s, steps } = planMaster({ original: report({ resonances: [{ hz: 392, prominenceDb: 9 }] }) });
+      expect(s.tameDepth1).toBe(0);
+      expect(steps.join(" ")).toMatch(/392 Hz \(G4\)/);
+    });
   });
 });
 

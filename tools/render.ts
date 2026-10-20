@@ -10,12 +10,13 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { analyze } from "../src/analysis/report.ts";
 import type { EngineState } from "../src/audio/engine.ts";
+import { MODULES } from "../src/master/settings.ts";
 import { compare } from "./compare.ts";
 import { writeWav } from "./ffmpeg.ts";
 import { pullChannels, sleep, startSession } from "./chrome.ts";
 import type { Cdp } from "./chrome.ts";
 
-const USAGE = `Usage: just render <track> [--set JSON] [--bypass eq,multi,comp,limiter] [--from S] [--seconds S] [--wav FILE]
+const USAGE = `Usage: just render <track> [--set JSON] [--bypass eq,tame,multi,comp,color,limiter] [--from S] [--seconds S] [--wav FILE]
        just render <track> --live SECONDS
 
 <track> is a file name in MUSIC_DIR (default ../deluge-quest/web/public/audio).`;
@@ -58,10 +59,11 @@ async function live(cdp: Cdp, base: string, track: string, q: URLSearchParams, s
   await sleep(1500);
   await snap("after a (original)");
   await cdp.key("a");
-  for (const key of ["Tab", "Tab", "Tab", "b"]) await cdp.key(key);
+  const tabs = MODULES.indexOf("limiter");
+  for (const key of [...Array<string>(tabs).fill("Tab"), "b"]) await cdp.key(key);
   await sleep(1500);
   const bypassed = await snap("limiter bypassed");
-  if (!bypassed.bypass.limiter) throw new Error("tab ×3 then b did not bypass the limiter");
+  if (!bypassed.bypass.limiter) throw new Error(`tab ×${tabs} then b did not bypass the limiter`);
   await cdp.key("ArrowRight");
   await sleep(300);
   const nudged = await snap("→ on limiter drive");

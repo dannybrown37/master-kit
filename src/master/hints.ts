@@ -211,6 +211,59 @@ function edgeHints(o: Report, s: Settings, bypass: Bypass): Hint[] {
   return out;
 }
 
+/** Shared with auto-master. Peaks below LO_HZ are usually the song's own notes, so they're never chased. */
+export const TAME_RULES = { loHz: 1500, hiHz: 8000, minProminenceDb: 5, depthDb: 4, maxDepthDb: 8, nearOct: 1 / 6 } as const;
+export const COLOR_RULES = { maxWarmth: 50, minClipDb: 1.5 } as const;
+
+/** The harsh resonances worth taming, most prominent first. */
+export function harshResonances(o: Report): Report["resonances"] {
+  const r = TAME_RULES;
+  return o.resonances.filter((x) => x.hz >= r.loHz && x.hz <= r.hiHz && x.prominenceDb >= r.minProminenceDb);
+}
+
+const TAME_BANDS = [
+  { freq: "tameFreq1", depth: "tameDepth1", name: "band 1" },
+  { freq: "tameFreq2", depth: "tameDepth2", name: "band 2" },
+] as const;
+
+function tameHints(o: Report, s: Settings, bypass: Bypass): Hint[] {
+  const r = TAME_RULES;
+  const out: Hint[] = [];
+  const near = (a: number, b: number): boolean => Math.abs(Math.log2(a / b)) <= r.nearOct;
+  const used = new Set<number>();
+  for (const res of harshResonances(o)) {
+    const what = `A resonance at ${formatParam("tameFreq1", res.hz)} sticks out ${f1(res.prominenceDb)} dB above the spectrum around it (harsh, ringing).`;
+    const on = TAME_BANDS.findIndex((b, i) => !used.has(i) && near(s[b.freq], res.hz));
+    if (on >= 0) {
+      used.add(on);
+      const b = TAME_BANDS[on];
+      if (bypass.tame || s[b.depth] < r.depthDb - 1) {
+        out.push({ level: "info", text: `${what} Tamer ${b.name} is on it: give it ~${r.depthDb} dB of Depth${bypass.tame ? " and un-bypass the Tamer" : ""}.`, knob: b.depth, suggest: r.depthDb - s[b.depth] });
+      }
+      continue;
+    }
+    const free = TAME_BANDS.findIndex((b, i) => !used.has(i) && s[b.depth] <= 0);
+    if (free < 0) continue;
+    used.add(free);
+    const b = TAME_BANDS[free];
+    out.push({ level: "info", text: `${what} Point Tamer ${b.name} at it.`, knob: b.freq, suggest: res.hz - s[b.freq] });
+  }
+  if (!bypass.tame) {
+    for (const b of TAME_BANDS) {
+      if (s[b.depth] > r.maxDepthDb) out.push({ level: "warn", text: `Tamer ${b.name} may cut ${formatParam(b.depth, s[b.depth])}: that deep, the sound goes hollow. 2–4 dB is usually enough.`, knob: b.depth });
+    }
+  }
+  if (!bypass.color) {
+    if (s.colorWarmth > COLOR_RULES.maxWarmth) {
+      out.push({ level: "warn", text: `Warmth ${formatParam("colorWarmth", s.colorWarmth)} is a lot: loud parts start to sound fuzzy. 10–30% adds density without obvious distortion.`, knob: "colorWarmth" });
+    }
+    if (s.colorClipDb < COLOR_RULES.minClipDb) {
+      out.push({ level: "warn", text: `Clip above ${formatParam("colorClipDb", s.colorClipDb)} clips nearly everything the limiter would have caught: drums turn crunchy. +2–3 dB takes only the sharpest hits.`, knob: "colorClipDb" });
+    }
+  }
+  return out;
+}
+
 function stereoHints(m: Report): Hint[] {
   const c = m.stereo.correlation;
   if (!Number.isFinite(c)) return [];
@@ -277,7 +330,7 @@ function referenceHints(m: Report, ref: Report, s: Settings): Hint[] {
 
 export function hints(input: HintInput): Hint[] {
   const { original, master, settings, bypass, reference } = input;
-  const out: Hint[] = [...settingHints(original, settings, bypass), ...edgeHints(original, settings, bypass)];
+  const out: Hint[] = [...settingHints(original, settings, bypass), ...edgeHints(original, settings, bypass), ...tameHints(original, settings, bypass)];
   if (!master) {
     out.push({ level: "info", text: "Press m to measure the whole song; hints about loudness, peaks and tone need a full-song measurement." });
   } else {

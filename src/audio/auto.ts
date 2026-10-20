@@ -5,6 +5,9 @@ import { TARGETS } from "../analysis/targets.ts";
 import { matchLoudness } from "../master/autogain.ts";
 import type { MatchResult } from "../master/autogain.ts";
 import { easeDynamics, planMaster } from "../master/automaster.ts";
+import type { PlanInput } from "../master/automaster.ts";
+import { STYLES, styleVariant } from "../master/shootout.ts";
+import type { Style } from "../master/shootout.ts";
 import { score } from "../master/score.ts";
 import type { Bypass, Settings } from "../master/settings.ts";
 import { formatParam } from "../master/settings.ts";
@@ -59,15 +62,42 @@ export interface AutoMaster {
   report: Report;
 }
 
+export interface Shootout {
+  bypass: Bypass;
+  steps: string[];
+  /** Each version with Drive set for the loudness target, so they compare at the same level. */
+  versions: Record<Style, Settings>;
+}
+
+/** The plan (without taste) in three styles, each rendered to the loudness target. Null if cancelled. */
+export async function shootout(
+  buffer: AudioBuffer,
+  original: Report,
+  options: Omit<PlanInput, "original" | "taste">,
+  onProgress: (text: string) => void = () => {},
+  cancelled: () => boolean = () => false,
+): Promise<Shootout | null> {
+  const plan = planMaster({ original, ...options });
+  const versions = {} as Record<Style, Settings>;
+  for (const [i, style] of STYLES.entries()) {
+    const settings = styleVariant(plan.settings, style);
+    const label = `shootout: version ${i + 1} of ${STYLES.length}`;
+    const { result } = await driveForTarget(buffer, settings, plan.bypass, (d) => onProgress(`${label}, rendering with Drive ${formatParam("limDrive", d)}…`), cancelled);
+    if (cancelled()) return null;
+    versions[style] = { ...settings, limDrive: result.drive };
+  }
+  return { bypass: plan.bypass, steps: plan.steps, versions };
+}
+
 /** Plans a master from the song's measurements, sets Drive by rendering, and eases the compression once if dynamics suffered. */
 export async function autoMaster(
   buffer: AudioBuffer,
   original: Report,
-  reference: Report | null,
+  options: Omit<PlanInput, "original">,
   onProgress: (text: string) => void = () => {},
   cancelled: () => boolean = () => false,
 ): Promise<AutoMaster | null> {
-  const plan = planMaster({ original, reference });
+  const plan = planMaster({ original, ...options });
   const steps = [...plan.steps];
   let settings = plan.settings;
   for (let attempt = 0; ; attempt++) {

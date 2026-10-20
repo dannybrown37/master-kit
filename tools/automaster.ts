@@ -2,7 +2,7 @@
  * Auto-masters a song through the real browser chain (headless Chrome): the same planner and Drive loop as the
  * Desk's auto-master button. Prints why each knob moved and a before/after report.
  *
- *   node tools/automaster.ts <track> [--ref <track>] [--wav FILE] [--session FILE] [--json]
+ *   node tools/automaster.ts <track> [--ref <track>] [--genre KEY] [--wav FILE] [--session FILE] [--json]
  *
  * <track> is a file name in MUSIC_DIR. With no track on a terminal, pick one with fzf.
  */
@@ -11,6 +11,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import type { AutoResult } from "../src/main.ts";
+import { GENRES, parseGenre } from "../src/master/genres.ts";
 import { score } from "../src/master/score.ts";
 import { toSession } from "../src/master/session.ts";
 import { PARAMS, defaultSettings, formatParam } from "../src/master/settings.ts";
@@ -19,13 +20,14 @@ import { writeWav } from "./ffmpeg.ts";
 import { pullChannels, startSession } from "./chrome.ts";
 import type { Session } from "./chrome.ts";
 
-const USAGE = `Usage: just automaster <track> [--ref <track>] [--wav FILE] [--session FILE] [--json]
+const USAGE = `Usage: just automaster <track> [--ref <track>] [--genre KEY] [--wav FILE] [--session FILE] [--json]
 
 Plans a master from the song's measurements (and the reference's), sets limiter Drive for -14 LUFS by rendering,
 and prints why each knob moved plus a before/after report. Runs the real browser chain in headless Chrome.
 
   <track>          a file name in MUSIC_DIR (default ../deluge-quest/web/public/audio); omit it on a terminal to pick with fzf
   --ref <track>    reference track (MUSIC_DIR): tone and width are matched to it instead of a generic balance
+  --genre KEY      ${GENRES.map((g) => g.key).join(" | ")} (default: from the "[year, genre]" tag in the file name)
   --wav FILE       write the master as a 32-bit float WAV (exactly what the chain produced)
   --session FILE   write the knobs as a session file (Desk: session… → load from file)
   --json           print the result as JSON instead of text
@@ -64,6 +66,7 @@ async function main(): Promise<number> {
     allowPositionals: true,
     options: {
       ref: { type: "string" },
+      genre: { type: "string" },
       wav: { type: "string" },
       session: { type: "string" },
       json: { type: "boolean" },
@@ -74,6 +77,10 @@ async function main(): Promise<number> {
   if (values.version) {
     console.log(`master-kit ${version()}`);
     return 0;
+  }
+  if (values.genre !== undefined && !parseGenre(values.genre)) {
+    console.error(`unknown genre "${values.genre}": use ${GENRES.map((g) => g.key).join(", ")}`);
+    return 2;
   }
   const interactive = process.stdin.isTTY && process.stdout.isTTY;
   if (values.help || positionals.length > 1 || (positionals.length === 0 && !interactive)) {
@@ -94,6 +101,7 @@ async function main(): Promise<number> {
     }
     const q = new URLSearchParams({ auto: "1", track });
     if (values.ref) q.set("ref", values.ref);
+    if (values.genre) q.set("genre", values.genre);
     if (!values.json) console.error(`auto-mastering ${track}${values.ref ? ` against ${values.ref}` : ""} (renders the song 2–6 times)…`);
     const { cdp } = session;
     await cdp.send("Page.navigate", { url: `${session.base}/?${q}` });
@@ -121,7 +129,7 @@ async function main(): Promise<number> {
       if (values.session) console.log(`wrote ${values.session} (Desk: session… → load from file)`);
     }
     if (picked) {
-      const args = [shellQuote(track), ...(values.ref ? ["--ref", shellQuote(values.ref)] : []), ...(values.wav ? ["--wav", shellQuote(values.wav)] : []), ...(values.session ? ["--session", shellQuote(values.session)] : []), ...(values.json ? ["--json"] : [])];
+      const args = [shellQuote(track), ...(values.ref ? ["--ref", shellQuote(values.ref)] : []), ...(values.genre ? ["--genre", values.genre] : []),...(values.wav ? ["--wav", shellQuote(values.wav)] : []), ...(values.session ? ["--session", shellQuote(values.session)] : []), ...(values.json ? ["--json"] : [])];
       console.error(`\nRun again with:\n  just automaster ${args.join(" ")}`);
     }
     return 0;

@@ -236,6 +236,52 @@ describe("hints", () => {
     });
   });
 
+  describe("tamer and color", () => {
+    const harsh = report({ resonances: [{ hz: 6700, prominenceDb: 7.7 }] });
+    const tameHints = (original = harsh, over: Partial<Settings> = {}): ReturnType<typeof hints> =>
+      hints(input({ original, settings: { ...defaultSettings(), ...over } })).filter((h) => h.knob?.startsWith("tame"));
+
+    it("points band 1 at a harsh resonance, then asks for depth, then is satisfied", () => {
+      const first = tameHints();
+      expect(first.map((h) => [h.knob, h.suggest])).toEqual([["tameFreq1", 6700 - 3500]]);
+      expect(first[0].text).toMatch(/6\.7 kHz.*7\.7 dB/);
+      const second = tameHints(harsh, { tameFreq1: 6700 });
+      expect(second.map((h) => [h.knob, h.suggest])).toEqual([["tameDepth1", 4]]);
+      expect(tameHints(harsh, { tameFreq1: 6700, tameDepth1: 4 })).toEqual([]);
+    });
+
+    it("uses band 2 when band 1 is already busy somewhere else", () => {
+      expect(tameHints(harsh, { tameFreq1: 3000, tameDepth1: 3 }).map((h) => h.knob)).toEqual(["tameFreq2"]);
+    });
+
+    it.each([
+      ["a low peak (likely the song's notes)", [{ hz: 392, prominenceDb: 9 }]],
+      ["a mild peak", [{ hz: 3000, prominenceDb: 4 }]],
+      ["above 8 kHz", [{ hz: 9500, prominenceDb: 9 }]],
+    ])("leaves %s alone", (_name, resonances) => {
+      expect(tameHints(report({ resonances }))).toEqual([]);
+    });
+
+    it.each([
+      ["lots of warmth", { colorWarmth: 70 }, "colorWarmth"],
+      ["clipping deep", { colorClipDb: 0.5 }, "colorClipDb"],
+      ["a deep tamer cut", { tameDepth1: 10 }, "tameDepth1"],
+    ] as const)("warns about %s", (_name, over, knob) => {
+      const h = hints(input({ settings: { ...defaultSettings(), ...over } })).find((x) => x.knob === knob);
+      expect(h?.level).toBe("warn");
+    });
+
+    it("applying the tamer suggestions never triggers the deep-cut warning", () => {
+      let s = defaultSettings();
+      for (let i = 0; i < 3; i++) {
+        const h = tameHints(harsh, s)[0];
+        if (!h?.knob || h.suggest === undefined) break;
+        s = { ...s, [h.knob]: s[h.knob] + h.suggest };
+      }
+      expect(hints(input({ original: harsh, settings: s })).filter((h) => h.level === "warn" || h.level === "bad")).toEqual([]);
+    });
+  });
+
   it("sorts problems first", () => {
     const list = hints(input({ master: report({ integrated: -9, plr: 7 }), settings: { ...defaultSettings(), eqAirGain: 8 } }));
     const order = { bad: 0, warn: 1, info: 2, good: 3 };

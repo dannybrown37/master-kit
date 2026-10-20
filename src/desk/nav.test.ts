@@ -15,23 +15,25 @@ describe("desk navigation", () => {
   });
 
   it.each([
-    ["tab goes to the multiband", 1, "multi"],
-    ["two tabs go to the compressor", 2, "comp"],
-    ["three tabs go to the limiter", 3, "limiter"],
+    ["tab goes to the tamer", 1, "tame"],
+    ["two tabs go to the multiband", 2, "multi"],
+    ["three tabs go to the compressor", 3, "comp"],
+    ["four tabs go to color", 4, "color"],
+    ["five tabs go to the limiter", 5, "limiter"],
     ["shift-tab wraps to edges", -1, "edges"],
-    ["five tabs come back to EQ", 5, "eq"],
+    ["seven tabs come back to EQ", 7, "eq"],
   ] as const)("%s", (_name, delta, want) => {
     expect(moveModule(initialNav(), delta).module).toBe(want);
   });
 
   it("remembers the knob in each module", () => {
     let nav = moveKnob(initialNav(), 3);
-    nav = moveModule(nav, 2);
+    nav = moveModule(nav, 3);
     nav = moveKnob(nav, 1);
     expect(selected(nav)).toBe("compRatio");
     nav = moveModule(nav, -1);
     expect(selected(nav)).toBe("mbLowThreshold");
-    expect(selected(moveModule(nav, -1))).toBe("eqMudGain");
+    expect(selected(moveModule(nav, -2))).toBe("eqMudGain");
   });
 
   it("selectKnob jumps to any knob and its module", () => {

@@ -126,8 +126,8 @@ export class SpectrumView {
     const yEq = (db: number): number => (0.5 - db / (2 * EQ_RANGE_DB)) * height;
 
     g.strokeStyle = cssVar("--line");
-    g.fillStyle = cssVar("--dim");
-    g.font = `${10 * dpr}px monospace`;
+    g.fillStyle = cssVar("--text-muted");
+    g.font = `${10 * dpr}px "IBM Plex Mono", monospace`;
     g.lineWidth = 1;
     for (const f of GRID_HZ) {
       g.beginPath();

@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { BUTTERWORTH_Q_DB, PARAMS, clampParam, compressorParams, defaultSettings, edgeParams, eqBands, formatParam, fromFraction, changedParams, limiterParams, multibandParams, noBypass, nudge, parseSettings, stereoParams, toFraction } from "./settings.ts";
+import { BUTTERWORTH_Q_DB, PARAMS, clampParam, colorParams, compressorParams, defaultSettings, edgeParams, tamerParams, eqBands, formatParam, fromFraction, changedParams, limiterParams, multibandParams, noBypass, nudge, parseSettings, stereoParams, toFraction } from "./settings.ts";
 import { Compressor } from "../dsp/compressor.ts";
+import { NEUTRAL_COLOR } from "../dsp/color.ts";
 import { NEUTRAL_EDGES } from "../dsp/edges.ts";
+import { NEUTRAL_TAMER } from "../dsp/tamer.ts";
 import { Limiter } from "../dsp/limiter.ts";
 import { SR, sine } from "../analysis/test-signals.ts";
 
 const NO_BYPASS = noBypass();
-const ALL_BYPASS = { eq: true, multi: true, comp: true, limiter: true, edges: true };
+const ALL_BYPASS = { eq: true, tame: true, multi: true, comp: true, color: true, limiter: true, edges: true };
 
 describe("settings", () => {
   it("every default sits inside its range", () => {
@@ -156,6 +158,35 @@ describe("module parameters", () => {
     const out = render(ALL_BYPASS);
     for (let i = 0; i < out.length; i += 97) expect(out[i]).toBeCloseTo(ref[i], 6);
     expect(Math.max(...render(NO_BYPASS).map(Math.abs))).not.toBeCloseTo(Math.max(...out.map(Math.abs)), 1);
+  });
+});
+
+describe("tamerParams", () => {
+  it.each([
+    ["defaults: off", {}, NO_BYPASS, NEUTRAL_TAMER],
+    ["bands and width pass through", { tameFreq1: 3150, tameDepth1: 4, tameFreq2: 400, tameDepth2: 2, tameQ: 6 }, NO_BYPASS, { q: 6, bands: [{ hz: 3150, depthDb: 4 }, { hz: 400, depthDb: 2 }] }],
+    ["bypassed: off", { tameDepth1: 4 }, ALL_BYPASS, NEUTRAL_TAMER],
+  ])("%s", (_name, over, bypass, want) => {
+    const p = tamerParams({ ...defaultSettings(), ...over }, bypass);
+    expect(p.bands.map((b) => b.depthDb)).toEqual(want.bands.map((b) => b.depthDb));
+    if (want !== NEUTRAL_TAMER) expect(p).toEqual(want);
+  });
+});
+
+describe("colorParams", () => {
+  it.each([
+    ["defaults: off", {}, NO_BYPASS, NEUTRAL_COLOR],
+    ["warmth in percent", { colorWarmth: 40 }, NO_BYPASS, { warmth: 0.4, clipDb: Infinity }],
+    // The limiter's threshold (before its Drive) is ceiling − drive = -1 − 4 = -5 dBFS; clip 2 dB above it.
+    ["clip sits above the limiter's threshold", { colorClipDb: 2, limCeiling: -1, limDrive: 4 }, NO_BYPASS, { warmth: 0, clipDb: -3 }],
+    ["bypassed: off", { colorWarmth: 40, colorClipDb: 2 }, ALL_BYPASS, NEUTRAL_COLOR],
+  ])("%s", (_name, over, bypass, want) => {
+    expect(colorParams({ ...defaultSettings(), ...over }, bypass)).toEqual(want);
+  });
+
+  it("formats the clip knob's top as off", () => {
+    expect(formatParam("colorClipDb", 6)).toBe("off");
+    expect(formatParam("colorClipDb", 2)).toBe("+2.0 dB");
   });
 });
 

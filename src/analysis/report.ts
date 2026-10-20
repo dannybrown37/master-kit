@@ -2,7 +2,9 @@ import { edgeStats } from "./edges.ts";
 import type { EdgeStats } from "./edges.ts";
 import { loudness, loudnessRange } from "./loudness.ts";
 import { ampToDb, samplePeak, truePeak } from "./peak.ts";
-import { bandEnergies } from "./spectrum.ts";
+import { findResonances } from "./resonance.ts";
+import type { Resonance } from "./resonance.ts";
+import { bandEnergies, powerSpectrum } from "./spectrum.ts";
 import type { BandEnergy } from "./spectrum.ts";
 import { stereoImage } from "./stereo.ts";
 import type { StereoImage } from "./stereo.ts";
@@ -30,6 +32,8 @@ export interface Report {
   /** Short-term loudness every 100 ms (LUFS), for plotting. */
   shortTerm: number[];
   edges: EdgeStats;
+  /** Narrow humps that stick out of the spectrum (150 Hz–8 kHz), most prominent first. */
+  resonances: Resonance[];
 }
 
 /** Sample peak over RMS across all channels, dB. */
@@ -54,6 +58,7 @@ export function analyze(channels: Float32Array[], sampleRate: number): Report {
   validate(channels, sampleRate);
   const l = loudness(channels, sampleRate);
   const tp = truePeak(channels, sampleRate);
+  const power = powerSpectrum(channels);
   return {
     sampleRate,
     channels: channels.length,
@@ -66,7 +71,8 @@ export function analyze(channels: Float32Array[], sampleRate: number): Report {
     samplePeak: samplePeak(channels),
     crest: crestFactor(channels),
     plr: tp - l.integrated,
-    bands: bandEnergies(channels, sampleRate),
+    bands: bandEnergies(channels, sampleRate, power),
+    resonances: findResonances(power, sampleRate),
     stereo: stereoImage(channels),
     shortTerm: l.shortTerm,
     edges: edgeStats(channels, sampleRate),

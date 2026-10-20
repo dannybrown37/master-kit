@@ -15,7 +15,9 @@ import { EQ_BAND_KNOBS, soloBand } from "./eq-drag.ts";
 import { score } from "../master/score.ts";
 import type { Score } from "../master/score.ts";
 import { History } from "../master/history.ts";
-import { autoMaster as runAutoMaster, driveForTarget } from "../audio/auto.ts";
+import { autoMaster as runAutoMaster, driveForTarget, shootout as runShootout } from "../audio/auto.ts";
+import { STYLE_INFO, blindOrder, recordPick, tasteLean } from "../master/shootout.ts";
+import type { Style } from "../master/shootout.ts";
 import type { MasterAudio } from "../audio/auto.ts";
 import { checklist } from "../master/checklist.ts";
 import { PRESETS, applyPreset } from "../master/presets.ts";
@@ -23,19 +25,25 @@ import type { Preset } from "../master/presets.ts";
 import { EDGE_KEYS, MODULES, MODULE_NAMES, PARAMS, changedParams, clampParam, defaultSettings, edgeParams, eqBands, formatParam, fromFraction, nudge, toFraction } from "../master/settings.ts";
 import type { Bypass, Module, ParamKey, Settings } from "../master/settings.ts";
 import { snapshotDiff } from "../master/snapshot.ts";
+import { GENRES, genre, genreFromName, parseGenre } from "../master/genres.ts";
+import type { GenreKey } from "../master/genres.ts";
+import { PLATFORMS, masterLoudness, nextPlatform, platform, playbackGainDb } from "../master/streaming.ts";
+import type { PlatformKey } from "../master/streaming.ts";
 import { parseSession, safeBaseName, sessionFileName, toSession } from "../master/session.ts";
 import { applyEdges } from "../dsp/edges.ts";
 import { encodeWav } from "../export/wav.ts";
 import type { BitDepth } from "../export/wav.ts";
+import { AlbumView } from "../album/view.ts";
 import { DrillView } from "../drills/view.ts";
 import { MeterBar, button, clock, db, download, h, signed } from "./dom.ts";
 import { GrTrace } from "./gr-trace.ts";
 import { LoudnessPlot } from "./loudness-plot.ts";
 import { initialNav, knobsOf, moveKnob, moveModule, selectKnob, selected } from "./nav.ts";
 import type { Nav } from "./nav.ts";
-import { lastReference, lastTrack, loadSettings, saveLastReference, saveLastTrack, saveSettings } from "./storage.ts";
+import { lastReference, lastTrack, loadSettings, loadTaste, saveLastReference, saveLastTrack, saveSettings, saveTaste } from "./storage.ts";
 
-const MB_BAND_NAMES = ["Low", "Mid", "High"] as const;
+/** Modules with one GR row per band. */
+const BAND_GR_NAMES: Partial<Record<Dynamics, readonly string[]>> = { multi: ["Low", "Mid", "High"], tame: ["Band 1", "Band 2"] };
 const SPECS = new Map(PARAMS.map((p) => [p.key as ParamKey, p]));
 const DEFAULTS = defaultSettings();
 const FINE = 0.2;
@@ -56,8 +64,8 @@ interface KnobView {
 interface PanelView {
   el: HTMLElement;
   bypass: HTMLButtonElement;
-  /** One GR row, or one per band for the multiband; the trace shows the module's worst. */
-  gr?: { module: Dynamics; rows: { bar: MeterBar; value: HTMLElement }[]; trace: GrTrace };
+  /** One GR row, or one per band (multiband, tamer); the trace shows the module's worst. */
+  gr?: { module: Dynamics; rows: { bar: MeterBar; value: HTMLElement }[]; trace: GrTrace | null };
 }
 
 interface MeterView {
@@ -74,7 +82,7 @@ export interface Measured {
   report: Report;
 }
 
-export type Mode = "desk" | "drills";
+export type Mode = "desk" | "drills" | "album";
 
 /** Identifies a render. Edges are left out: they're applied at export, so changing them needs no new render. */
 export function settingsKey(settings: Settings, bypass: Bypass): string {
@@ -110,6 +118,10 @@ export class Desk {
   private autoSteps: string[] = [];
   private autoEl: HTMLDetailsElement | null = null;
   private soloOn = false;
+  /** Streaming preview platform, or null. */
+  private platform: PlatformKey | null = null;
+  /** The master's platform gain comes from a current measurement (else it's a live estimate). */
+  private streamExact = false;
   private soloKey = "";
   private readonly spectrum = new SpectrumView({
     onGrab: (band) => {
@@ -142,6 +154,20 @@ export class Desk {
 
   private readonly trackSelect: HTMLSelectElement;
   private readonly refSelect: HTMLSelectElement;
+  private readonly genreSelect: HTMLSelectElement;
+  /** Picked by hand; null = from the file name. */
+  private genreOverride: GenreKey | null = null;
+  /** A running blind shootout: versions by style, played in `order`; `before` = the knobs to go back to on cancel. */
+  private shoot: {
+    order: Style[];
+    versions: Record<Style, Settings>;
+    bypass: Bypass;
+    current: number;
+    before: { settings: Settings; bypass: Bypass };
+    picked: Style | null;
+  } | null = null;
+  private readonly shootEl: HTMLElement;
+  private shootSignature = "";
   private readonly refFile: HTMLInputElement;
   private readonly hintsEl: HTMLElement;
   private reference: { name: string; report: Report | null } | null = null;
@@ -163,6 +189,7 @@ export class Desk {
   private readonly panels = new Map<Module, PanelView>();
   private readonly meters: Record<"momentary" | "shortTerm" | "integrated" | "truePeak" | "correlation" | "width", MeterView>;
   private readonly monoButton: HTMLButtonElement;
+  private readonly streamButton: HTMLButtonElement;
   private readonly liveScoreEl: HTMLElement;
   private readonly meterHead: { bar: HTMLElement; value: HTMLElement; sub: HTMLElement };
   private readonly explainEl: HTMLElement;
@@ -171,6 +198,7 @@ export class Desk {
   protected readonly deskEl: HTMLElement;
   private readonly keysEl: HTMLElement;
   private readonly drills: DrillView;
+  private readonly album: AlbumView;
   private readonly modeButtons: Record<Mode, HTMLButtonElement>;
   private mode: Mode = "desk";
 
@@ -207,6 +235,7 @@ export class Desk {
     this.exportButton = button("export WAV", () => this.run(this.exportWav(24)), "e: 24-bit WAV · E: 16-bit dithered");
     this.refButton = button("Ref", () => this.engine.toggleReference(), "r: hear the reference at the master's loudness");
     this.monoButton = button("Mono", () => this.engine.toggleMono(), "o: listen summed to mono (phone speaker, club PA)");
+    this.streamButton = button("streaming", () => this.cycleStream(), "p: hear it the way Spotify / Apple Music / YouTube play it back (their loudness normalization)");
     const saveSnap = button("snap", () => this.saveSnapshot(), "c: save these knobs as a snapshot to compare against");
     this.snapButton = button("vs snap", () => this.toggleSnapshot(), "x: hear the snapshot at the master's loudness · X: swap it with your knobs");
     this.toolbar = h(
@@ -219,6 +248,7 @@ export class Desk {
       this.abButton,
       this.refButton,
       this.monoButton,
+      this.streamButton,
       saveSnap,
       this.snapButton,
       this.measureButton,
@@ -226,11 +256,20 @@ export class Desk {
     );
 
     this.drills = new DrillView(engine.ctx, () => engine.loaded);
+    this.album = new AlbumView(engine.ctx, tracks, {
+      pauseDesk: () => engine.pause(),
+      openInDesk: (track) => {
+        this.setMode("desk");
+        this.trackSelect.value = track;
+        this.run(this.loadTrack(track));
+      },
+    });
     this.modeButtons = {
       desk: button("Desk", () => this.setMode("desk"), "d: switch desk / drills"),
       drills: button("Drills", () => this.setMode("drills"), "d: switch desk / drills"),
+      album: button("Album", () => this.setMode("album"), "master several songs alike and export them in order"),
     };
-    const tabs = h("span", "row tabs", this.modeButtons.desk, this.modeButtons.drills);
+    const tabs = h("span", "row tabs", this.modeButtons.desk, this.modeButtons.drills, this.modeButtons.album);
     this.refSelect = h("select");
     this.refSelect.title = "Reference track: a finished song you want yours to sit next to";
     this.refSelect.replaceChildren(new Option("reference: none", ""), ...tracks.map((t) => new Option(`ref: ${t}`, t)));
@@ -272,7 +311,14 @@ export class Desk {
       if (action === "load") sessionFile.click();
     };
     const auto = button("auto-master", () => this.run(this.autoMaster()), "A: plan a master from this song's measurements (and the reference), with the reason for each knob");
-    this.refRow = h("div", "row", this.refSelect, this.refFile, presetSelect, auto, session, sessionFile);
+    this.genreSelect = h("select");
+    this.genreSelect.title = "Genre for auto-master: the tonal target, glue, color and clipping a style usually wants (auto = from the [year, genre] tag in the file name)";
+    this.genreSelect.onchange = (): void => {
+      this.genreOverride = parseGenre(this.genreSelect.value);
+    };
+    this.syncGenreSelect();
+    const shootout = button("shootout", () => this.run(this.startShootout()), "v: hear three versions of the auto-master blind and pick by ear; your picks steer later auto-masters");
+    this.refRow = h("div", "row", this.refSelect, this.refFile, this.genreSelect, presetSelect, auto, shootout, session, sessionFile);
     const header = h("header", "", h("div", "row", h("h1", "", "MASTER KIT"), tabs, this.trackSelect, this.fileInput, this.messageEl), this.refRow, this.toolbar);
 
     const modulePanels = MODULES.map((m) => this.buildPanel(m));
@@ -296,19 +342,28 @@ export class Desk {
       ...Object.values(meterRows).map((r) => r.row),
       this.liveScoreEl,
     );
-    // Compressor and limiter share a column: four modules side by side would squeeze the knobs.
-    const [eqPanel, multiPanel, compPanel, limiterPanel, edgesPanel] = modulePanels;
-    this.deskEl = h("main", "desk", eqPanel, multiPanel, h("div", "stack", compPanel, limiterPanel), h("div", "stack meters-col", meterPanel, edgesPanel));
+    // Four columns, modules in signal order down and across; more side by side would squeeze the knobs.
+    const p = Object.fromEntries(MODULES.map((m, i) => [m, modulePanels[i]])) as Record<Module, HTMLElement>;
+    this.deskEl = h(
+      "main",
+      "desk",
+      h("div", "stack", p.eq, p.tame),
+      p.multi,
+      h("div", "stack", p.comp, p.color, p.limiter),
+      h("div", "stack meters-col", meterPanel, p.edges),
+    );
 
     this.explainEl = h("section", "panel explain");
     this.scoreEl = h("section", "panel scorecard");
     this.hintsEl = h("section", "panel hints");
     this.checklistEl = h("section", "panel checklist");
+    this.shootEl = h("section", "panel shootout");
+    this.shootEl.hidden = true;
     this.lower = h("div", "lower", h("div", "stack", this.checklistEl, this.hintsEl, this.explainEl), this.scoreEl);
     this.keysEl = h("footer", "keys");
     this.keysEl.innerHTML = this.keyHelp();
 
-    root.replaceChildren(h("div", "app", header, this.deskEl, this.spectrum.el, this.lower, this.drills.el, this.keysEl));
+    root.replaceChildren(h("div", "app", header, this.shootEl, this.deskEl, this.spectrum.el, this.lower, this.drills.el, this.album.el, this.keysEl));
     engine.onChange = (s): void => {
       this.state = s;
       this.schedule();
@@ -333,8 +388,10 @@ export class Desk {
       k("m", "measure"),
       k("l", `Drive for ${TARGETS.integrated} LUFS`),
       k("A", "auto-master"),
+      k("v", "blind shootout"),
       k("r", "reference"),
       k("o", "mono"),
+      k("p", "streaming preview"),
       k("c / x / X", "snapshot: save / compare / swap"),
       k("s", "solo EQ band"),
       k("h", "apply top hint"),
@@ -346,10 +403,15 @@ export class Desk {
   setMode(mode: Mode): void {
     if (mode === this.mode) return;
     this.mode = mode;
-    if (mode === "drills") {
+    if (mode !== "desk") {
+      if (this.shoot && !this.shoot.picked) this.endShootout(true);
+      this.shoot = null;
       this.engine.pause();
-      this.run(this.drills.enter());
-    } else this.drills.leave();
+    }
+    if (mode === "drills") this.run(this.drills.enter());
+    else this.drills.leave();
+    if (mode === "album") this.album.render();
+    else this.album.leave();
     this.schedule();
   }
 
@@ -392,6 +454,44 @@ export class Desk {
     this.say(`reference: ${name}`);
   }
 
+  protected currentGenre(): GenreKey {
+    return this.genreOverride ?? genreFromName(this.track);
+  }
+
+  private syncGenreSelect(): void {
+    const detected = genre(genreFromName(this.track)).label;
+    this.genreSelect.replaceChildren(new Option(`genre: auto (${detected})`, ""), ...GENRES.map((g) => new Option(`genre: ${g.label}`, g.key)));
+    this.genreSelect.value = this.genreOverride ?? "";
+  }
+
+  private cycleStream(): void {
+    this.platform = nextPlatform(this.platform);
+    if (!this.platform) {
+      this.engine.setStream(null);
+      this.say("streaming preview off: A/B, reference and snapshot are loudness-matched again");
+      return;
+    }
+    const p = platform(this.platform);
+    const up = p.turnsUp ? "turns quieter songs up as far as their peaks allow" : "only turns loud songs down";
+    this.say(`streaming preview: ${p.name} plays everything at ${p.lufs} LUFS (${up}). A/B and the reference now play as a listener hears them: normalized, not matched.`);
+    this.syncStream();
+  }
+
+  /** Platform gains from full-song loudness; the master's follows the knobs live (≈) until a current measurement exists. */
+  private syncStream(): void {
+    const o = this.originalReport;
+    if (!this.platform || !o) return;
+    const p = platform(this.platform);
+    const s = this.state;
+    const measured = this.measured?.key === this.currentKey() ? this.measured.report : null;
+    const master = masterLoudness(measured, o, s.matchDb, s.master.truePeak);
+    this.streamExact = master.exact;
+    const ref = this.reference?.report;
+    const want = { master: playbackGainDb(p, master), original: playbackGainDb(p, o), reference: ref ? playbackGainDb(p, ref) : 0 };
+    const now = s.stream;
+    if (!now || (Object.keys(want) as (keyof typeof want)[]).some((k) => Math.abs(want[k] - now[k]) > 0.05)) this.engine.setStream(want);
+  }
+
   /** The reference plays at the master's loudness: measured if current, else the live meter, else the original. */
   private syncReferenceMatch(): void {
     const ref = this.reference?.report;
@@ -427,6 +527,9 @@ export class Desk {
     this.track = name;
     saveLastTrack(name);
     this.engine.setAll(settings ?? loadSettings(name) ?? defaultSettings());
+    this.genreOverride = null;
+    this.shoot = null;
+    this.syncGenreSelect();
     this.history.clear();
     this.originalReport = null;
     this.measured = null;
@@ -522,7 +625,7 @@ export class Desk {
       const auto = await runAutoMaster(
         await native,
         original,
-        ref,
+        { reference: ref, genre: this.currentGenre(), taste: tasteLean(loadTaste()) },
         (text) => {
           this.busy = text;
           this.schedule();
@@ -541,6 +644,104 @@ export class Desk {
       this.busy = "";
       this.schedule();
     }
+  }
+
+  /** Renders three versions (gentle, balanced, punchy) at the same loudness and plays them blind, in a random order. */
+  protected async startShootout(): Promise<void> {
+    const native = this.native;
+    const original = this.originalReport;
+    if (!native || this.busy) return;
+    if (!original) {
+      this.say("still measuring the original: try again in a moment");
+      return;
+    }
+    try {
+      const result = await runShootout(
+        await native,
+        original,
+        { reference: this.reference?.report ?? null, genre: this.currentGenre() },
+        (text) => {
+          this.busy = text;
+          this.schedule();
+        },
+        () => this.native !== native,
+      );
+      if (!result || this.native !== native) return;
+      const { settings, bypass } = this.engine.state;
+      this.history.record(settings, null, performance.now());
+      this.shoot = { order: blindOrder(), versions: result.versions, bypass: result.bypass, current: 0, before: { settings, bypass }, picked: null };
+      this.engine.setBypass(result.bypass);
+      this.hearVersion(0);
+      this.say("blind shootout: 1 / 2 / 3 switch versions (same loudness), Enter picks the one playing, Esc cancels");
+    } finally {
+      this.busy = "";
+      this.schedule();
+    }
+  }
+
+  private hearVersion(i: number): void {
+    const s = this.shoot;
+    if (!s || s.picked) return;
+    s.current = i;
+    this.engine.setAll(s.versions[s.order[i]]);
+  }
+
+  private pickVersion(): void {
+    const s = this.shoot;
+    if (!s || s.picked) return;
+    const style = s.order[s.current];
+    s.picked = style;
+    const taste = recordPick(loadTaste(), style);
+    saveTaste(taste);
+    this.saveKnobs();
+    const lean = tasteLean(taste);
+    const where = Math.abs(lean) < 0.05 ? "no lean yet" : `auto-master now leans ${lean > 0 ? "punchy" : "gentle"} ${Math.round(Math.abs(lean) * 100)}%`;
+    this.say(`you picked ${s.current + 1} = ${style} (${STYLE_INFO[style]}) · ${where}. Its knobs are on the desk now.`);
+  }
+
+  /** `restore`: back to the knobs from before the shootout. */
+  private endShootout(restore: boolean): void {
+    const s = this.shoot;
+    if (!s) return;
+    if (restore) {
+      this.engine.setAll(s.before.settings);
+      this.engine.setBypass(s.before.bypass);
+      this.say("shootout cancelled: your knobs are back");
+    }
+    this.shoot = null;
+  }
+
+  private renderShootout(): void {
+    const s = this.shoot;
+    this.deskEl.classList.toggle("blind", !!s && !s.picked);
+    this.spectrum.el.classList.toggle("blind", !!s && !s.picked);
+    const signature = JSON.stringify(s ? [s.current, s.picked, s.order] : null);
+    if (signature === this.shootSignature) return;
+    this.shootSignature = signature;
+    this.shootEl.hidden = !s;
+    if (!s) return;
+    const title = h("h2", "", "Blind shootout", h("span", "kbd", s.picked ? "Enter: done" : "1 2 3 · Enter: pick · Esc"));
+    if (s.picked) {
+      const taste = loadTaste();
+      const reveal = s.order.map((style, i) => h("li", style === s.picked ? "picked" : "", `${i + 1} = ${style}: ${STYLE_INFO[style]}`));
+      this.shootEl.replaceChildren(
+        title,
+        h("ol", "reveal", ...reveal),
+        h("p", "dim", `Picks so far: gentle ${taste.gentle} · balanced ${taste.balanced} · punchy ${taste.punchy}. Auto-master leans toward what you pick.`),
+        button("done", () => this.endShootout(false), "Enter: keep these knobs"),
+      );
+      return;
+    }
+    const versions = s.order.map((_, i) => {
+      const b = button(String(i + 1), () => this.hearVersion(i), `${i + 1}: hear version ${i + 1}`);
+      b.className = i === s.current ? "on" : "";
+      return b;
+    });
+    this.shootEl.replaceChildren(
+      title,
+      h("p", "", "Three versions of this master at the same loudness, in a random order. The knobs are hidden: listen, switch, pick the one you'd ship."),
+      h("div", "row", ...versions, button("pick this one", () => this.pickVersion(), "Enter"), button("cancel", () => this.endShootout(true), "Esc")),
+    );
   }
 
   /** Renders (or reuses) the full-song master and downloads it as WAV at the song's own sample rate. */
@@ -677,11 +878,12 @@ export class Desk {
         el.append(h("div", "meter gr", label, bar.el, value, h("span", "")));
         return { bar, value };
       };
-      const bands = module === "multi" ? MB_BAND_NAMES.map((name) => grRow(`${name} GR`)) : [];
-      const total = module === "multi" ? null : grRow("GR");
-      const trace = new GrTrace(GR_MAX, 10);
-      el.append(trace.el);
-      view.gr = { module, rows: total ? [total] : bands, trace };
+      const names = BAND_GR_NAMES[module];
+      const rows = names ? names.map((name) => grRow(`${name} GR`)) : [grRow(module === "color" ? "Clip" : "GR")];
+      // The tamer and color panels stay short: a trace each would make their column the tallest.
+      const trace = module === "tame" || module === "color" ? null : new GrTrace(GR_MAX, 10);
+      if (trace) el.append(trace.el);
+      view.gr = { module, rows, trace };
     }
     this.panels.set(module, view);
     return el;
@@ -721,6 +923,25 @@ export class Desk {
   protected keyAction(ev: KeyboardEvent): (() => unknown) | null {
     if (ev.key === "d") return () => this.setMode(this.mode === "desk" ? "drills" : "desk");
     if (this.mode === "drills") return this.drills.keyAction(ev);
+    if (this.mode === "album") return this.album.keyAction(ev);
+    if (this.shoot && !this.shoot.picked) {
+      // Blind: only listening keys; the knobs would give the versions away.
+      const listening: Record<string, () => unknown> = {
+        " ": () => this.engine.toggle(),
+        "1": () => this.hearVersion(0),
+        "2": () => this.hearVersion(1),
+        "3": () => this.hearVersion(2),
+        Enter: () => this.pickVersion(),
+        Escape: () => this.endShootout(true),
+        ",": () => this.engine.seek(this.state.position - SEEK_SECONDS),
+        ".": () => this.engine.seek(this.state.position + SEEK_SECONDS),
+        a: () => this.engine.toggleAB(),
+        o: () => this.engine.toggleMono(),
+        p: () => this.cycleStream(),
+      };
+      return listening[ev.key] ?? null;
+    }
+    if (this.shoot?.picked && (ev.key === "Escape" || ev.key === "Enter")) return () => this.endShootout(false);
     const knob = selected(this.nav);
     const s = this.state;
     const actions: Record<string, () => unknown> = {
@@ -742,8 +963,10 @@ export class Desk {
       m: () => this.measureMaster(),
       l: () => this.matchTarget(),
       A: () => this.autoMaster(),
+      v: () => this.startShootout(),
       r: () => this.engine.toggleReference(),
       o: () => this.engine.toggleMono(),
+      p: () => this.cycleStream(),
       c: () => this.saveSnapshot(),
       x: () => this.toggleSnapshot(),
       X: () => this.swapSnapshot(),
@@ -771,24 +994,39 @@ export class Desk {
 
   protected render(): void {
     const s = this.state;
-    const drilling = this.mode === "drills";
+    /** Not on the Desk: its panels are hidden and skip their drawing. */
+    const drilling = this.mode !== "desk";
     for (const el of [this.toolbar, this.refRow, this.deskEl, this.spectrum.el, this.lower, this.keysEl]) el.hidden = drilling;
-    this.drills.el.hidden = !drilling;
-    this.modeButtons.desk.className = drilling ? "" : "on";
-    this.modeButtons.drills.className = drilling ? "on" : "";
+    this.drills.el.hidden = this.mode !== "drills";
+    this.album.el.hidden = this.mode !== "album";
+    for (const m of ["desk", "drills", "album"] as const) this.modeButtons[m].className = this.mode === m ? "on" : "";
+    this.trackSelect.hidden = this.mode === "album";
+    this.fileInput.hidden = this.mode === "album";
     this.messageEl.textContent = this.busy || this.message;
     this.messageEl.className = `message${this.messageIsError ? " error" : ""}`;
     this.playButton.textContent = s.playing ? "❚❚ pause" : "▶ play";
     this.timeEl.textContent = `${clock(s.position)} / ${clock(s.duration)}`;
     this.progressFill.style.width = `${s.duration > 0 ? (s.position / s.duration) * 100 : 0}%`;
     this.syncReferenceMatch();
-    const listenLabels: Record<Listen, string> = {
-      master: "MASTER",
-      original: `ORIGINAL ${signed(s.matchDb)} dB`,
-      reference: `REFERENCE ${signed(s.referenceDb)} dB`,
-      snapshot: `SNAPSHOT ${signed(s.snapshotDb)} dB`,
-    };
+    this.syncStream();
+    const st = s.stream;
+    const listenLabels: Record<Listen, string> = st
+      ? {
+          master: `MASTER ${signed(st.master)} dB`,
+          original: `ORIGINAL ${signed(st.original)} dB`,
+          reference: `REFERENCE ${signed(st.reference)} dB`,
+          snapshot: `SNAPSHOT ${signed(st.master + s.snapshotDb)} dB`,
+        }
+      : {
+          master: "MASTER",
+          original: `ORIGINAL ${signed(s.matchDb)} dB`,
+          reference: `REFERENCE ${signed(s.referenceDb)} dB`,
+          snapshot: `SNAPSHOT ${signed(s.snapshotDb)} dB`,
+        };
     this.listenEl.textContent = listenLabels[s.listen];
+    if (this.platform) this.listenEl.textContent += ` · ON ${platform(this.platform).name.toUpperCase()}${this.streamExact ? "" : " ≈"}`;
+    this.streamButton.textContent = this.platform ? `on ${platform(this.platform).name}` : "streaming";
+    this.streamButton.className = this.platform ? "on" : "";
     this.refButton.disabled = !s.hasReference;
     this.refButton.className = s.listen === "reference" ? "on" : "";
     this.snapButton.disabled = !s.snapshotKnobs;
@@ -819,14 +1057,14 @@ export class Desk {
       view.bypass.textContent = off ? "bypassed" : "on";
       view.bypass.className = off ? "off" : "on";
       if (view.gr) {
-        const values = view.gr.module === "multi" ? s.reduction.bands : [s.reduction[view.gr.module]];
+        const values = BAND_GR_NAMES[view.gr.module] ? (s.reduction.bands[view.gr.module] ?? []) : [s.reduction[view.gr.module]];
         view.gr.rows.forEach((row, i) => {
           const gr = values[i] ?? 0;
           row.bar.set(gr, gr > 6 ? "bad" : gr > 3 ? "warn" : "");
           row.value.textContent = `${gr.toFixed(1)} dB`;
         });
         const ring = this.engine.grHistory[view.gr.module];
-        if (!drilling) view.gr.trace.draw(ring.values(), ring.size);
+        if (!drilling) view.gr.trace?.draw(ring.values(), ring.size);
       }
     }
 
@@ -855,6 +1093,7 @@ export class Desk {
 
     this.renderExplain(current);
     this.renderChecklist();
+    this.renderShootout();
     this.renderHints();
     this.renderScore();
   }
@@ -864,16 +1103,15 @@ export class Desk {
     const s = this.state;
     const bins = this.spectrumBins;
     for (const which of LISTENS) this.engine.spectrum(which, bins[which]);
-    const purple = "#c39bff";
     const css = getComputedStyle(document.documentElement);
     const color = (name: string): string => css.getPropertyValue(name).trim();
-    const master = { bins: bins.master, offsetDb: 0, color: color("--accent"), label: "master" };
+    const master = { bins: bins.master, offsetDb: 0, color: color("--series-master"), label: "master" };
     const pair =
       s.listen === "reference" && s.hasReference
-        ? { main: { bins: bins.reference, offsetDb: s.referenceDb, color: purple, label: "reference" }, ghost: master }
+        ? { main: { bins: bins.reference, offsetDb: s.referenceDb, color: color("--series-reference"), label: "reference" }, ghost: master }
         : s.listen === "snapshot" && s.snapshotKnobs
-          ? { main: { bins: bins.snapshot, offsetDb: s.snapshotDb, color: color("--snap"), label: "snapshot" }, ghost: master }
-          : { main: master, ghost: { bins: bins.original, offsetDb: s.matchDb, color: color("--warn"), label: "original" } };
+          ? { main: { bins: bins.snapshot, offsetDb: s.snapshotDb, color: color("--series-snapshot"), label: "snapshot" }, ghost: master }
+          : { main: master, ghost: { bins: bins.original, offsetDb: s.matchDb, color: color("--series-original"), label: "original" } };
     const bands = eqBands(s.settings, s.bypass);
     this.spectrum.draw({
       ...pair,
@@ -1007,6 +1245,22 @@ export class Desk {
     );
   }
 
+  /** What each platform does to the volume: louder than its target buys nothing, it's just turned down. */
+  private streamingTable(o: Report, master: Report | null, ref: Report | null): Node[] {
+    const cell = (p: (typeof PLATFORMS)[number], r: Report | null, cls = ""): HTMLElement => h("td", cls, r ? `${signed(playbackGainDb(p, r))} dB` : "");
+    const rows = PLATFORMS.map((p) =>
+      h("tr", "", h("td", "", `${p.name} (${p.lufs} LUFS)`), cell(p, o), cell(p, master), h("td", "", ""), ...(ref ? [cell(p, ref, "ref")] : []), h("td", "", "")),
+    );
+    const head = h("tr", "", h("th", "", "plays it at"), h("th", "", "original"), h("th", "", "master"), h("th", "", ""), ...(ref ? [h("th", "ref", "ref")] : []), h("th", "", ""));
+    const spotify = PLATFORMS[0];
+    const cut = master ? -playbackGainDb(spotify, master) : 0;
+    const note =
+      cut > 0.5
+        ? `${spotify.name} turns this master down ${cut.toFixed(1)} dB: that loudness bought nothing, and the limiting it took stays. p plays it as listeners hear it.`
+        : "p plays it as listeners hear it: each song at the platform's level, not matched to each other.";
+    return [h("h3", "", "On streaming", h("span", "dim", " · volume change on playback (loudness normalization)")), h("table", "", head, ...rows), h("p", "dim", note)];
+  }
+
   protected renderScore(): void {
     const o = this.originalReport;
     const mm = this.measured;
@@ -1061,7 +1315,8 @@ export class Desk {
     } else {
       children.push(h("p", "dim", this.busy || "press m to render the whole song with these settings and score it"));
     }
-    children.push(h("h3", "", "Loudness over the song", h("span", "dim", " · yellow original · blue master · click to seek")), this.plot.el, table);
+    children.push(h("h3", "", "Loudness over the song", h("span", "dim", " · blue original · amber master · click to seek")), this.plot.el, table);
+    children.push(...this.streamingTable(o, r && !stale ? r : null, ref ?? null));
     this.scoreEl.replaceChildren(...children);
     this.plot.update(o, r && !stale ? r : null, ref ?? null, this.state.position);
   }

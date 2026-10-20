@@ -6,14 +6,20 @@
 import type { Report } from "../analysis/report.ts";
 import { ANALYSER_TILT_DB_PER_OCT, BANDS, relativeGaps, tiltedShares } from "../analysis/spectrum.ts";
 import { TARGETS } from "../analysis/targets.ts";
-import { EDGE_RULES, hardEdges } from "./hints.ts";
+import { genre } from "./genres.ts";
+import type { GenreKey } from "./genres.ts";
+import { EDGE_RULES, TAME_RULES, harshResonances, hardEdges } from "./hints.ts";
 import { GENTLE_GLUE, applyPreset } from "./presets.ts";
-import { MB_OFF_DB, MB_THRESHOLDS, clampParam, defaultSettings, formatParam, noBypass } from "./settings.ts";
+import { STYLE_INFO, applyTaste } from "./shootout.ts";
+import { CLIP_OFF_DB, MB_OFF_DB, MB_THRESHOLDS, MONO_BASS_OFF_HZ, clampParam, defaultSettings, formatParam, noBypass } from "./settings.ts";
 import type { Bypass, ParamKey, Settings } from "./settings.ts";
 
 export interface PlanInput {
   original: Report;
   reference?: Report | null;
+  genre?: GenreKey;
+  /** Shootout taste, -1 (gentle) … +1 (punchy); see `tasteLean`. */
+  taste?: number;
 }
 
 export interface Plan {
@@ -37,7 +43,6 @@ const DENSE_PLR_DB = 9;
 const WIDTH_GAP_DB = 4;
 const WIDTH_RANGE: [number, number] = [70, 130];
 const OUT_OF_PHASE_WIDTH = 80;
-const MONO_BASS_HZ = 100;
 const MB_RATIO = 2.5;
 const MB_HIGH_SPLIT_HZ = 5000;
 /** Easing compression for dynamics: the glue drops to this ratio, thresholds rise this much. */
@@ -57,18 +62,33 @@ function shareOf(r: Report, keys: string[]): number {
   return 10 * Math.log10(keys.reduce((sum, k) => sum + 10 ** (r.bands[bandIndex(k)].db / 10), 0));
 }
 
-export function planMaster({ original: o, reference: ref = null }: PlanInput): Plan {
+export function planMaster(input: PlanInput): Plan {
+  const plan = basePlan(input);
+  const lean = input.taste ?? 0;
+  if (Math.abs(lean) < 0.05) return plan;
+  const style = lean > 0 ? "punchy" : "gentle";
+  return {
+    ...plan,
+    settings: applyTaste(plan.settings, lean),
+    steps: [...plan.steps, `Taste: your shootout picks lean ${style} (${Math.round(Math.abs(lean) * 100)}%), so this plan moves that far toward ${style}: ${STYLE_INFO[style]}.`],
+  };
+}
+
+function basePlan({ original: o, reference: ref = null, genre: genreKey = "generic" }: PlanInput): Plan {
   const s = defaultSettings();
   const bypass = noBypass();
   const steps: string[] = [];
   const set = (key: ParamKey, value: number): number => (s[key] = clampParam(key, value));
+  const g = genre(genreKey);
+  steps.push(`Genre: ${g.label}: ${g.why}.`);
 
-  const target = ref ? ref.bands.map((b) => b.db) : tiltedShares(ANALYSER_TILT_DB_PER_OCT);
+  const target = ref ? ref.bands.map((b) => b.db) : tiltedShares(ANALYSER_TILT_DB_PER_OCT).map((db, i) => db + g.tone[i]);
   const gaps = relativeGaps(
     o.bands.map((b) => b.db),
     target,
   );
-  const against = ref ? "the reference" : `a balanced spectrum (flat on the ${ANALYSER_TILT_DB_PER_OCT} dB/oct analyser; a reference gives a better target)`;
+  const styled = g.tone.some((x) => x !== 0) ? ` shaped for ${g.label}` : "";
+  const against = ref ? "the reference" : `a balanced spectrum${styled} (a reference gives a better target)`;
   const cap = ref ? EQ_CAP_REFERENCE_DB : EQ_CAP_GENERIC_DB;
   steps.push(`Tone vs ${against}: ${o.bands.map((b, i) => `${b.label} ${signedDb(gaps[i])}`).join(", ")}.`);
   // A band this far under the target is (nearly) empty: a boost there only lifts rumble or hiss.
@@ -129,8 +149,12 @@ export function planMaster({ original: o, reference: ref = null }: PlanInput): P
   if (flat) steps.push(`EQ: flat. No band is ${EQ_ACT_DB} dB or more off, so the tone is left to the mix.`);
 
   // Stereo.
-  set("eqMonoBassHz", MONO_BASS_HZ);
-  steps.push(`Stereo: bass below ${MONO_BASS_HZ} Hz to mono. Nobody hears direction down there, and it keeps the low end solid on club systems.`);
+  set("eqMonoBassHz", g.monoBassHz);
+  steps.push(
+    g.monoBassHz > MONO_BASS_OFF_HZ
+      ? `Stereo: bass below ${formatParam("eqMonoBassHz", s.eqMonoBassHz)} to mono. Nobody hears direction down there, and it keeps the low end solid on club systems.`
+      : `Stereo: bass left in stereo, as recorded (${g.label}).`,
+  );
   const sideGap = ref ? o.stereo.sideDb - ref.stereo.sideDb : NaN;
   if (Number.isFinite(sideGap) && Math.abs(sideGap) >= WIDTH_GAP_DB) {
     const width = Math.max(WIDTH_RANGE[0], Math.min(WIDTH_RANGE[1], Math.round((100 * 10 ** (-sideGap / 20)) / 5) * 5));
@@ -142,7 +166,9 @@ export function planMaster({ original: o, reference: ref = null }: PlanInput): P
   }
 
   // Glue compression.
-  if (o.plr < DENSE_PLR_DB) {
+  if (g.glue === "none") {
+    steps.push(`Compressor: off. In ${g.label} the dynamics are the point; the limiter only catches peaks.`);
+  } else if (o.plr < DENSE_PLR_DB) {
     steps.push(`Compressor: off. PLR is already ${f1(o.plr)} dB (dense); more compression would only flatten it.`);
   } else {
     const glue = applyPreset(GENTLE_GLUE, o.integrated);
@@ -150,11 +176,47 @@ export function planMaster({ original: o, reference: ref = null }: PlanInput): P
     steps.push(`Compressor: gentle glue (${formatParam("compRatio", s.compRatio)}, RMS, slow attack, sidechain ${formatParam("compSidechainHz", s.compSidechainHz)}), threshold ${formatParam("compThreshold", s.compThreshold)}: 3 dB under the song's loudness, so it rides the loud parts by 1–3 dB.`);
   }
 
+  steps.push(...planTamer(o, set));
+
+  set("colorWarmth", g.warmth);
+  set("colorClipDb", g.clipDb);
+  if (g.warmth > 0 || g.clipDb < CLIP_OFF_DB) {
+    const parts = [g.warmth > 0 ? `warmth ${formatParam("colorWarmth", s.colorWarmth)}` : "", g.clipDb < CLIP_OFF_DB ? `soft clip ${formatParam("colorClipDb", s.colorClipDb)} above the limiter` : ""];
+    steps.push(`Color: ${parts.filter(Boolean).join(", ")} (${g.label}).`);
+  }
+
   set("limCeiling", TARGETS.truePeakMax);
   set("limDrive", TARGETS.integrated - o.integrated);
   steps.push(`Limiter: ceiling ${formatParam("limCeiling", s.limCeiling)} (safe for mp3/AAC encoding).`);
   steps.push(...planEdges(o, set));
   return { settings: s, bypass, steps };
+}
+
+const NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/** Nearest equal-tempered note (A4 = 440 Hz), e.g. 392 → "G4". */
+export function noteName(hz: number): string {
+  const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+  return `${NOTES[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}`;
+}
+
+function planTamer(o: Report, set: (key: ParamKey, value: number) => number): string[] {
+  const steps: string[] = [];
+  const harsh = harshResonances(o).slice(0, 2);
+  harsh.forEach((r, i) => {
+    set(i === 0 ? "tameFreq1" : "tameFreq2", r.hz);
+    set(i === 0 ? "tameDepth1" : "tameDepth2", TAME_RULES.depthDb);
+  });
+  if (harsh.length) {
+    const list = harsh.map((r) => `${formatParam("tameFreq1", r.hz)} (+${f1(r.prominenceDb)} dB)`).join(" and ");
+    const one = harsh.length === 1;
+    steps.push(`Tamer: ${list} ${one ? "rings" : "ring"} out of the spectrum around ${one ? "it" : "them"} → up to ${TAME_RULES.depthDb} dB cut, only while ${one ? "it sticks" : "they stick"} out.`);
+  }
+  const notes = o.resonances.filter((r) => r.hz < TAME_RULES.loHz && r.prominenceDb >= TAME_RULES.minProminenceDb);
+  if (notes.length) {
+    steps.push(`Tamer: peaks at ${notes.map((r) => `${Math.round(r.hz)} Hz (${noteName(r.hz)})`).join(", ")} are most likely the song's own notes, so they're left alone.`);
+  }
+  return steps;
 }
 
 function planEdges(o: Report, set: (key: ParamKey, value: number) => number): string[] {

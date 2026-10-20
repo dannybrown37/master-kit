@@ -23,7 +23,7 @@ export class LoudnessPlot {
     this.canvas = h("canvas");
     this.playhead = h("div", "playhead");
     this.el = h("div", "plot", this.canvas, this.playhead);
-    this.el.title = "Short-term loudness over the song: yellow = original, blue = master, purple dashes = reference (integrated). Click to seek.";
+    this.el.title = "Short-term loudness over the song: blue = original, amber = master, violet dashes = reference (integrated). Click to seek.";
     this.el.onclick = (ev): void => {
       const rect = this.el.getBoundingClientRect();
       if (this.duration > 0 && rect.width > 0) onSeek(((ev.clientX - rect.left) / rect.width) * this.duration);
@@ -50,8 +50,8 @@ export class LoudnessPlot {
     g.fillStyle = cssVar("--zone");
     g.fillRect(0, y(this.zone[1]), width, y(this.zone[0]) - y(this.zone[1]));
     g.strokeStyle = cssVar("--line");
-    g.fillStyle = cssVar("--dim");
-    g.font = `${10 * devicePixelRatio}px monospace`;
+    g.fillStyle = cssVar("--text-muted");
+    g.font = `${10 * devicePixelRatio}px "IBM Plex Mono", monospace`;
     for (const lufs of GRID_LUFS) {
       g.beginPath();
       g.moveTo(0, y(lufs));
@@ -60,7 +60,7 @@ export class LoudnessPlot {
       g.fillText(`${lufs}`, 2 * devicePixelRatio, y(lufs) - 2 * devicePixelRatio);
     }
     if (reference && Number.isFinite(reference.integrated)) {
-      g.strokeStyle = "#c39bff";
+      g.strokeStyle = cssVar("--series-reference");
       g.setLineDash([6 * devicePixelRatio, 4 * devicePixelRatio]);
       g.beginPath();
       g.moveTo(0, y(reference.integrated));
@@ -89,7 +89,7 @@ export class LoudnessPlot {
       g.stroke();
       g.lineWidth = 1;
     };
-    curve(original, cssVar("--warn"));
-    if (master) curve(master, cssVar("--accent"));
+    curve(original, cssVar("--series-original"));
+    if (master) curve(master, cssVar("--series-master"));
   }
 }

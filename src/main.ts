@@ -1,16 +1,18 @@
 /**
  *   /?track=<name>[&set={json}][&autoplay]                 the Desk
  *   /?render=1&track=<name>[&set=..&from=..&seconds=..]   offline render for tools/render.ts
- *   /?auto=1&track=<name>[&ref=<name>]                    auto-master for tools/automaster.ts
+ *   /?auto=1&track=<name>[&ref=<name>][&genre=<key>]      auto-master for tools/automaster.ts (genre: from the name)
  */
 import type { Report } from "./analysis/report.ts";
 import { autoMaster } from "./audio/auto.ts";
 import { Engine } from "./audio/engine.ts";
 import { measure } from "./audio/measure.ts";
 import { decodeAt, decodeNative, renderMaster } from "./audio/render.ts";
+import { fetchTrack } from "./audio/tracks.ts";
 import { Desk, channelsOf } from "./desk/desk.ts";
 import "./desk/desk.css";
 import type { Rendered } from "./audio/render.ts";
+import { genreFromName, parseGenre } from "./master/genres.ts";
 import { MODULES, parseSettings } from "./master/settings.ts";
 import type { Bypass, Module, Settings } from "./master/settings.ts";
 
@@ -49,12 +51,6 @@ function settingsFromUrl(): ReturnType<typeof parseSettings> {
   }
 }
 
-async function fetchTrack(name: string): Promise<ArrayBuffer> {
-  const res = await fetch(`/tracks/${encodeURIComponent(name)}`);
-  if (!res.ok) throw new Error(`could not load track "${name}" (${res.status})`);
-  return res.arrayBuffer();
-}
-
 function toBase64(x: Float32Array): string {
   const bytes = new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
   let s = "";
@@ -88,7 +84,8 @@ async function autoMode(): Promise<void> {
   const refBuffer = refName ? await decodeTrack(refName) : null;
   const reference = refBuffer ? await measure(channelsOf(refBuffer), refBuffer.sampleRate) : null;
   const t0 = performance.now();
-  const auto = await autoMaster(buffer, original, reference, (text) => console.log(text));
+  const genre = parseGenre(params.get("genre")) ?? genreFromName(track);
+  const auto = await autoMaster(buffer, original, { reference, genre }, (text) => console.log(text));
   if (!auto) throw new Error("auto-master stopped before it finished");
   console.log(`auto-master took ${((performance.now() - t0) / 1000).toFixed(1)} s`);
   const { settings, bypass, steps, report, audio } = auto;

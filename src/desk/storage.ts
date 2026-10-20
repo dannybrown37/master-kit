@@ -1,6 +1,8 @@
 /** Per-track settings and drill progress in localStorage. Everything read back goes through a validator. */
 import { parseSettings } from "../master/settings.ts";
 import type { Settings } from "../master/settings.ts";
+import { parseTaste } from "../master/shootout.ts";
+import type { Taste } from "../master/shootout.ts";
 
 const PREFIX = "master-kit:v1:";
 
@@ -29,6 +31,14 @@ export function loadSettings(track: string): Settings | null {
 
 export function saveSettings(track: string, settings: Settings): void {
   writeJson(`settings:${track}`, settings);
+}
+
+export function loadTaste(): Taste {
+  return parseTaste(readJson("taste"));
+}
+
+export function saveTaste(taste: Taste): void {
+  writeJson("taste", taste);
 }
 
 export function lastTrack(): string | null {

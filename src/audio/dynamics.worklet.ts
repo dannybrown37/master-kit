@@ -2,6 +2,10 @@
 import { LiveLoudness } from "../analysis/live.ts";
 import { TruePeakMeter } from "../analysis/peak.ts";
 import { LiveStereo } from "../analysis/stereo.ts";
+import { Color } from "../dsp/color.ts";
+import type { ColorParams } from "../dsp/color.ts";
+import { Tamer } from "../dsp/tamer.ts";
+import type { TamerParams } from "../dsp/tamer.ts";
 import { Compressor } from "../dsp/compressor.ts";
 import type { CompressorParams } from "../dsp/compressor.ts";
 import { Limiter } from "../dsp/limiter.ts";
@@ -33,7 +37,7 @@ function dynamicsProcessor<P>(create: (params: P) => Processor & { setParams(p: 
     private readonly dsp: Processor & { setParams(p: P): void };
     private blocks = 0;
     private worst = 0;
-    private readonly worstBands = [0, 0, 0];
+    private worstBands: number[] = [];
 
     constructor(options: { processorOptions: { params: P } }) {
       super(options);
@@ -49,7 +53,7 @@ function dynamicsProcessor<P>(create: (params: P) => Processor & { setParams(p: 
       this.dsp.process(channels, output);
       this.worst = Math.max(this.worst, this.dsp.reductionDb);
       const bands = this.dsp.bandReductionDb;
-      if (bands) for (let i = 0; i < bands.length; i++) this.worstBands[i] = Math.max(this.worstBands[i], bands[i]);
+      if (bands) for (let i = 0; i < bands.length; i++) this.worstBands[i] = Math.max(this.worstBands[i] ?? 0, bands[i]);
       if (++this.blocks % REPORT_EVERY === 0) {
         this.port.postMessage({ type: "reduction", db: this.worst, ...(bands ? { bands: [...this.worstBands] } : {}) } satisfies FromDynamics);
         this.worst = 0;
@@ -67,6 +71,14 @@ registerProcessor(
 registerProcessor(
   "multiband",
   dynamicsProcessor<MultibandParams>((p) => new Multiband(sampleRate, p)),
+);
+registerProcessor(
+  "tamer",
+  dynamicsProcessor<TamerParams>((p) => new Tamer(sampleRate, p)),
+);
+registerProcessor(
+  "color",
+  dynamicsProcessor<ColorParams>((p) => new Color(sampleRate, p)),
 );
 registerProcessor(
   "limiter",

@@ -32,6 +32,20 @@ describe("monitorGains", () => {
   });
 
   it.each([
+    ["master", { wet: 10 ** (-5 / 20), dry: 0, ref: 0, snap: 0 }],
+    ["original", { wet: 0, dry: 10 ** (-2 / 20), ref: 0, snap: 0 }],
+    ["reference", { wet: 0, dry: 0, ref: 10 ** (-8 / 20), snap: 0 }],
+    // The snapshot has no full-song loudness of its own: it stays matched to the master, then gets the master's gain.
+    ["snapshot", { wet: 0, dry: 0, ref: 0, snap: 10 ** ((2 - 5) / 20) }],
+  ] as const)("streaming preview, %s: each plays at the platform's gain for it, not matched", (listen, want) => {
+    const g = monitorGains(listen, { original: 6, reference: -4, snapshot: 2 }, { master: -5, original: -2, reference: -8 });
+    expect(g.wet).toBeCloseTo(want.wet, 9);
+    expect(g.dry).toBeCloseTo(want.dry, 9);
+    expect(g.ref).toBeCloseTo(want.ref, 9);
+    expect(g.snap).toBeCloseTo(want.snap, 9);
+  });
+
+  it.each([
     ["louder reference turned down", -14, -8, -6],
     ["quieter reference turned up", -14, -20, 6],
     ["clamped", -14, -60, 24],

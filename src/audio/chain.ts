@@ -1,23 +1,26 @@
 /**
  * The mastering chain as Web Audio nodes. Works on AudioContext and OfflineAudioContext alike.
  *
- *   input ─► low shelf ─► mud ─► presence ─► air shelf ─► mid/side (width, mono bass) ─► multiband ─► compressor ─► limiter ─► master
- *     └──────────────────────► delay (limiter latency) ──────────────────────────────────────► original
+ *   input ─► EQ (4 bands) ─► mid/side (width, mono bass) ─► tamer ─► multiband ─► compressor ─► color ─► limiter ─► master
+ *     └──────────────────────► delay (color + limiter latency) ─────────────────────────────────────────► original
  */
+import { COLOR_LATENCY } from "../dsp/color.ts";
 import type { CompressorParams } from "../dsp/compressor.ts";
 import { limiterLatency } from "../dsp/limiter.ts";
 import type { LimiterParams } from "../dsp/limiter.ts";
-import { BUTTERWORTH_Q_DB, compressorParams, eqBands, limiterParams, multibandParams, stereoParams } from "../master/settings.ts";
+import { BUTTERWORTH_Q_DB, colorParams, compressorParams, eqBands, limiterParams, multibandParams, stereoParams, tamerParams } from "../master/settings.ts";
 import type { Bypass, Settings, StereoParams } from "../master/settings.ts";
-import type { ToCompressor, ToLimiter, ToMultiband } from "./messages.ts";
+import type { ToColor, ToCompressor, ToLimiter, ToMultiband, ToTamer } from "./messages.ts";
 import workletUrl from "./dynamics.worklet.ts?worker&url";
 
 export interface Chain {
   input: AudioNode;
   master: AudioNode;
   original: AudioNode;
+  tamer: AudioWorkletNode;
   multiband: AudioWorkletNode;
   compressor: AudioWorkletNode;
+  color: AudioWorkletNode;
   limiter: AudioWorkletNode;
   latencySeconds: number;
   apply(settings: Settings, bypass: Bypass): void;
@@ -105,25 +108,29 @@ export function stereoStage(ctx: BaseAudioContext, p: StereoParams): StereoStage
 export function buildChain(ctx: BaseAudioContext, settings: Settings, bypass: Bypass): Chain {
   const input = new GainNode(ctx, { channelCount: 2, channelCountMode: "explicit" });
   const eq = eqBands(settings, bypass).map((b) => new BiquadFilterNode(ctx, { type: b.type, frequency: b.frequency, gain: b.gain, Q: b.q }));
+  const tamer = stereoWorklet(ctx, "tamer", tamerParams(settings, bypass));
   const multiband = stereoWorklet(ctx, "multiband", multibandParams(settings, bypass));
   const compressor = stereoWorklet(ctx, "compressor", compressorParams(settings, bypass));
+  const color = stereoWorklet(ctx, "color", colorParams(settings, bypass));
   const limiter = stereoWorklet(ctx, "limiter", limiterParams(settings, bypass));
-  const latencySeconds = limiterLatency(ctx.sampleRate) / ctx.sampleRate;
+  const latencySeconds = (COLOR_LATENCY + limiterLatency(ctx.sampleRate)) / ctx.sampleRate;
   const original = new DelayNode(ctx, { delayTime: latencySeconds, maxDelayTime: Math.max(1, latencySeconds) });
 
   const stereo = stereoStage(ctx, stereoParams(settings, bypass));
 
   const series: AudioNode[] = [input, ...eq, stereo.input];
   for (let i = 1; i < series.length; i++) series[i - 1].connect(series[i]);
-  stereo.output.connect(multiband).connect(compressor).connect(limiter);
+  stereo.output.connect(tamer).connect(multiband).connect(compressor).connect(color).connect(limiter);
   input.connect(original);
 
   return {
     input,
     master: limiter,
     original,
+    tamer,
     multiband,
     compressor,
+    color,
     limiter,
     latencySeconds,
     apply(s: Settings, b: Bypass): void {
@@ -134,8 +141,10 @@ export function buildChain(ctx: BaseAudioContext, settings: Settings, bypass: By
         eq[i].Q.setTargetAtTime(band.q, at, SMOOTHING_SECONDS);
       });
       stereo.apply(stereoParams(s, b), at);
+      tamer.port.postMessage({ type: "params", params: tamerParams(s, b) } satisfies ToTamer);
       multiband.port.postMessage({ type: "params", params: multibandParams(s, b) } satisfies ToMultiband);
       compressor.port.postMessage({ type: "params", params: compressorParams(s, b) } satisfies ToCompressor);
+      color.port.postMessage({ type: "params", params: colorParams(s, b) } satisfies ToColor);
       limiter.port.postMessage({ type: "params", params: limiterParams(s, b) } satisfies ToLimiter);
     },
   };

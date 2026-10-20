@@ -1,16 +1,28 @@
 /** Every knob on the desk: ranges, defaults, and the mapping to each processing module. */
 import type { CompressorParams } from "../dsp/compressor.ts";
+import { NEUTRAL_COLOR } from "../dsp/color.ts";
+import type { ColorParams } from "../dsp/color.ts";
 import { NEUTRAL_EDGES } from "../dsp/edges.ts";
 import type { EdgeParams } from "../dsp/edges.ts";
+import { NEUTRAL_TAMER } from "../dsp/tamer.ts";
+import type { TamerParams } from "../dsp/tamer.ts";
 import type { LimiterParams } from "../dsp/limiter.ts";
 import { NEUTRAL_BAND } from "../dsp/multiband.ts";
 import type { MultibandParams } from "../dsp/multiband.ts";
 
 /** In signal order. */
-export type Module = "eq" | "multi" | "comp" | "limiter" | "edges";
-export const MODULES: readonly Module[] = ["eq", "multi", "comp", "limiter", "edges"];
+export type Module = "eq" | "tame" | "multi" | "comp" | "color" | "limiter" | "edges";
+export const MODULES: readonly Module[] = ["eq", "tame", "multi", "comp", "color", "limiter", "edges"];
 export type Bypass = Record<Module, boolean>;
-export const MODULE_NAMES: Record<Module, string> = { eq: "EQ", multi: "Multiband", comp: "Compressor", limiter: "Limiter", edges: "Edges" };
+export const MODULE_NAMES: Record<Module, string> = {
+  eq: "EQ",
+  tame: "Tamer",
+  multi: "Multiband",
+  comp: "Compressor",
+  color: "Color",
+  limiter: "Limiter",
+  edges: "Edges",
+};
 
 export function noBypass(): Bypass {
   return Object.fromEntries(MODULES.map((m) => [m, false])) as Bypass;
@@ -42,6 +54,11 @@ export const PARAMS = [
   { key: "eqWidth", module: "eq", label: "Stereo width", unit: "%", min: 0, max: 200, step: 5, scale: "lin", default: 100 },
   { key: "eqMonoBassHz", module: "eq", label: "Mono bass below", unit: "Hz", min: 20, max: 300, step: 1, scale: "log", default: 20 },
   { key: "eqSideAirGain", module: "eq", label: "Side air gain", unit: "dB", min: -6, max: 6, step: 0.5, scale: "lin", default: 0 },
+  { key: "tameFreq1", module: "tame", label: "Band 1 freq", unit: "Hz", min: 150, max: 10000, step: 1, scale: "log", default: 3500 },
+  { key: "tameDepth1", module: "tame", label: "Band 1 depth", unit: "dB", min: 0, max: 12, step: 0.5, scale: "lin", default: 0 },
+  { key: "tameFreq2", module: "tame", label: "Band 2 freq", unit: "Hz", min: 150, max: 10000, step: 1, scale: "log", default: 300 },
+  { key: "tameDepth2", module: "tame", label: "Band 2 depth", unit: "dB", min: 0, max: 12, step: 0.5, scale: "lin", default: 0 },
+  { key: "tameQ", module: "tame", label: "Width (Q)", unit: "", min: 1, max: 10, step: 0.1, scale: "log", default: 4 },
   { key: "mbLowThreshold", module: "multi", label: "Low threshold", unit: "dB", min: -40, max: 0, step: 0.5, scale: "lin", default: 0 },
   { key: "mbLowGain", module: "multi", label: "Low gain", unit: "dB", min: -6, max: 6, step: 0.5, scale: "lin", default: 0 },
   { key: "mbMidThreshold", module: "multi", label: "Mid threshold", unit: "dB", min: -40, max: 0, step: 0.5, scale: "lin", default: 0 },
@@ -61,6 +78,8 @@ export const PARAMS = [
   { key: "compMakeup", module: "comp", label: "Makeup", unit: "dB", min: 0, max: 12, step: 0.5, scale: "lin", default: 0 },
   { key: "compSidechainHz", module: "comp", label: "Sidechain HPF", unit: "Hz", min: 20, max: 300, step: 1, scale: "log", default: 20 },
   { key: "compRmsMs", module: "comp", label: "Detector", unit: "ms", min: 0, max: 100, step: 5, scale: "lin", default: 0 },
+  { key: "colorWarmth", module: "color", label: "Warmth", unit: "%", min: 0, max: 100, step: 5, scale: "lin", default: 0 },
+  { key: "colorClipDb", module: "color", label: "Clip above", unit: "dB", min: 0, max: 6, step: 0.5, scale: "lin", default: 6 },
   { key: "limDrive", module: "limiter", label: "Drive", unit: "dB", min: -12, max: 12, step: 0.1, scale: "lin", default: 0 },
   { key: "limCeiling", module: "limiter", label: "Ceiling", unit: "dBTP", min: -3, max: 0, step: 0.1, scale: "lin", default: -1 },
   { key: "limRelease", module: "limiter", label: "Release", unit: "ms", min: 10, max: 500, step: 1, scale: "log", default: 50 },
@@ -124,7 +143,9 @@ export const MONO_BASS_OFF_HZ = 20;
 export const MB_OFF_DB = 0;
 export const MB_THRESHOLDS = ["mbLowThreshold", "mbMidThreshold", "mbHighThreshold"] as const;
 export const MB_GAINS = ["mbLowGain", "mbMidGain", "mbHighGain"] as const;
-export const EDGE_KEYS = ["edgeLeadMs", "edgeFadeInMs", "edgeFadeOutMs", "edgeTailMs"] as const;
+/** "Clip above" at the top of its range = no clipping. */
+export const CLIP_OFF_DB = 6;
+export const EDGE_KEYS =["edgeLeadMs", "edgeFadeInMs", "edgeFadeOutMs", "edgeTailMs"] as const;
 type EdgeKey = (typeof EDGE_KEYS)[number];
 
 export function formatParam(key: ParamKey, value: number): string {
@@ -134,6 +155,8 @@ export function formatParam(key: ParamKey, value: number): string {
   if ((MB_THRESHOLDS as readonly string[]).includes(key) && value >= MB_OFF_DB) return "off";
   if (key === "compRmsMs") return value <= 0 ? "peak" : `RMS ${Math.round(value)} ms`;
   if (EDGE_KEYS.includes(key as EdgeKey) && value <= 0) return "off";
+  if ((key === "tameDepth1" || key === "tameDepth2" || key === "colorWarmth") && value <= 0) return "off";
+  if (key === "colorClipDb") return value >= CLIP_OFF_DB ? "off" : `+${value.toFixed(1)} dB`;
   if (unit === "%") return value === 0 ? "mono" : `${Math.round(value)}%`;
   if (unit === "Hz") return value >= 1000 ? `${(value / 1000).toFixed(1)} kHz` : `${Math.round(value)} Hz`;
   if (unit === "ms" && value > 1000) return `${(value / 1000).toFixed(1)} s`;
@@ -216,6 +239,24 @@ export function multibandParams(s: Settings, bypass: Bypass): MultibandParams {
     bypass.multi ? NEUTRAL_BAND : { thresholdDb: s[t] >= MB_OFF_DB ? Infinity : s[t], gainDb: s[MB_GAINS[i]] },
   );
   return { lowHz: s.mbLowHz, highHz: s.mbHighHz, bands, ratio: s.mbRatio, attackMs: s.mbAttack, releaseMs: s.mbRelease };
+}
+
+export function tamerParams(s: Settings, bypass: Bypass): TamerParams {
+  if (bypass.tame) return NEUTRAL_TAMER;
+  return {
+    q: s.tameQ,
+    bands: [
+      { hz: s.tameFreq1, depthDb: s.tameDepth1 },
+      { hz: s.tameFreq2, depthDb: s.tameDepth2 },
+    ],
+  };
+}
+
+/** The clipper sits `colorClipDb` above the limiter's threshold (ceiling − Drive): it takes the peaks first. */
+export function colorParams(s: Settings, bypass: Bypass): ColorParams {
+  if (bypass.color) return NEUTRAL_COLOR;
+  const limiterThreshold = s.limCeiling - (bypass.limiter ? 0 : s.limDrive);
+  return { warmth: s.colorWarmth / 100, clipDb: s.colorClipDb >= CLIP_OFF_DB ? Infinity : limiterThreshold + s.colorClipDb };
 }
 
 export function edgeParams(s: Settings, bypass: Bypass): EdgeParams {

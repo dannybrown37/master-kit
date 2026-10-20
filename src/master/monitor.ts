@@ -10,9 +10,16 @@ const MAX_MATCH_DB = 24;
 /** Match gains (dB) that bring each comparison to the master's loudness. */
 export type MatchDb = Record<Exclude<Listen, "master">, number>;
 
-export function monitorGains(listen: Listen, match: MatchDb): { wet: number; dry: number; ref: number; snap: number } {
-  const gain = (which: Exclude<Listen, "master">): number => (listen === which ? 10 ** (match[which] / 20) : 0);
-  return { wet: listen === "master" ? 1 : 0, dry: gain("original"), ref: gain("reference"), snap: gain("snapshot") };
+/** Streaming preview: the gain (dB) a platform applies to each song on playback (see `streaming.ts`). */
+export type StreamDb = Record<"master" | "original" | "reference", number>;
+
+/** With `stream`, each source plays at its own platform gain instead of matched to the master: what a listener hears. */
+export function monitorGains(listen: Listen, match: MatchDb, stream: StreamDb | null = null): { wet: number; dry: number; ref: number; snap: number } {
+  const db: Record<Listen, number> = stream
+    ? { master: stream.master, original: stream.original, reference: stream.reference, snapshot: match.snapshot + stream.master }
+    : { master: 0, ...match };
+  const gain = (which: Listen): number => (listen === which ? 10 ** (db[which] / 20) : 0);
+  return { wet: gain("master"), dry: gain("original"), ref: gain("reference"), snap: gain("snapshot") };
 }
 
 /** What the meter panel shows: the bar and the "|" marker. While you hear the reference or snapshot it is compared with the master. */
