@@ -1,0 +1,102 @@
+# Master Kit: notes for coding agents
+
+Browser app for learning audio mastering on finished mp3s: TypeScript + Web Audio + Vite. See README.md.
+Mastering only (no stems). Danny does all git; never init, commit or push.
+
+## Commands
+
+- `just check`: typecheck + eslint + vitest (run before ending a turn; prek runs the same)
+- `just dev`: dev server on 127.0.0.1:5174 (5173 is music-shader's); reachable from Windows Chrome via WSL localhost forwarding.
+  Songs come from `MUSIC_DIR` (default `../deluge-quest/web/public/audio`).
+- `just analyze <file> [--json]`: metrics report for one song (ffmpeg decodes to f32 PCM)
+- `just crosscheck [files...]`: our meters vs `ffmpeg -af ebur128=peak=true`; no args = EBU synthetic cases
+- `just render <track> [--set JSON] [--bypass eq,multi,comp,limiter] [--wav FILE] | --live S`: runs the real browser
+  chain in headless Chrome (starts its own Vite) and prints before/after plus a null test. The way to verify
+  audio-engine changes from WSL. `tools/chrome.ts` has the CDP helpers (also for screenshots).
+- `just automaster <track> [--ref <track>] [--wav FILE] [--session FILE] [--json]`: auto-master in headless Chrome
+  (page route `/?auto=1`, same `autoMaster()` as the Desk's `A`); prints the reasons, knobs and before/after.
+
+## Layout
+
+- `src/analysis/`: meters (offline `loudness`/`truePeak`/`bandEnergies`/`stereoImage`, streaming `LiveLoudness`/`TruePeakMeter`/`LiveStereo`)
+- `src/dsp/`: `Compressor` (peak/RMS, sidechain HPF), `Limiter`, `Multiband` (`crossover.ts` = 3-band Linkwitz-Riley,
+  bands sum flat; neutral = skipped bit-exact, on/off crossfades): per-sample DSP classes, run in the worklet and in Node tests;
+  `biquad.ts` = EQ magnitude response (matches `BiquadFilterNode.getFrequencyResponse` to 0.0000 dB)
+- `src/master/`: pure desk logic. `settings.ts` (every knob: range, default, module, `nudge`/`toFraction`/`formatParam`;
+  `parseSettings` validates untrusted input), `monitor.ts` (A/B/reference gains, loudness match, which meters to show), `score.ts`,
+  `hints.ts`, `explain.ts` (help text), `history.ts` (undo/redo), `snapshot.ts` (snapshot type + "what differs"),
+  `session.ts` (session JSON file: `parseSession` validates untrusted input), `automaster.ts` (pure planner: Report
+  [+ reference] → settings + a reason per move; `easeDynamics`)
+- `src/audio/`: Web Audio glue. `chain.ts` builds the graph for AudioContext or OfflineAudioContext,
+  `engine.ts` is live playback (+ reference, mono check, snapshot chain), `render.ts` offline full-song, `drill-render.ts` drill clips,
+  `measure.ts` runs `analyze()` in `analysis.worker.ts`, `dynamics.worklet.ts` hosts the DSP classes and meters,
+  `sample-rate.ts` reads a file's own rate from its header (mp3/WAV/FLAC), `auto.ts` = render loops (`driveForTarget`
+  for `l`, `autoMaster` = plan → Drive → ease once if dynamics fail)
+- `src/desk/`: the UI (plain DOM, no framework). `desk.ts` (Desk class, keys, render at rAF), `nav.ts` (pure
+  knob selection), `dom.ts` helpers, `storage.ts` (localStorage, always read back through a validator)
+- `src/drills/`: `drills.ts` (pure: levels, questions, progress, loudness match), `player.ts`, `view.ts`
+- `src/export/wav.ts`: PCM WAV encoder (pure)
+- `src/main.ts`: routes `/` to the Desk, `/?render=1` to the offline render used by `tools/render.ts`, `/?auto=1` to auto-master
+- `tools/`: CLIs (`analyze`, `crosscheck`, `render`, `export`, `shot`, `automaster`); `chrome.ts` = headless Chrome + Vite
+  (+ `pullChannels`), `compare.ts` = before/after table, `ffmpeg.ts` (+ `writeWav`)
+
+## Conventions
+
+- Imports use explicit `.ts` extensions (Node runs tools/*.ts with type stripping; no enums or parameter properties).
+- `src/analysis/` and `src/dsp/` must stay DOM-free: they run in Node tests and in AudioWorklets.
+  Inputs are `Float32Array[]` channels plus a sample rate.
+- Meter math follows the standards: BS.1770-4 / EBU R128 (`loudness.ts`), Tech 3342 LRA, BS.1770 Annex 2 true peak (`peak.ts`).
+  Expected values in tests come from EBU Tech 3341/3342 cases, not from our own output.
+  After touching meter math, run `just crosscheck`.
+- The limiter must keep output ≤ ceiling on a 16x true-peak check (tests use mp3-bandwidth noise).
+  After touching it, `just render ... --wav out/x.wav` then `just crosscheck out/x.wav`.
+- Adding a knob: add it to `PARAMS` in `src/master/settings.ts`, map it in `eqBands`/`stereoParams`/`compressorParams`/`limiterParams`,
+  and give it help text in `explain.ts` (tsc enforces that).
+- Two decodes per song: the engine's (AudioContext rate, live playback and drills) and the Desk's `native` one
+  (the file's own rate, via `decodeNative`): measuring, scoring and export use the native one.
+- Web Audio `BiquadFilterNode` Q is in dB for `highpass`/`lowpass` (linear for peaking); see `BUTTERWORTH_Q_DB`.
+- Delivery targets live in `src/analysis/targets.ts`; tonal bands in `BANDS` (`spectrum.ts`).
+- Tests: vitest with `it.each` tables; synthetic audio from `src/analysis/test-signals.ts`.
+  Fade test tones (`faded`) when measuring true peak: a hard onset rings above the steady-state peak.
+- UI changes: `just shot <track> [--play S] [--keys ...] [--query drills=1]` and look at both PNGs.
+  The mobile PNG must be 780 px wide (390 @2x); wider means something overflows the phone screen.
+  Desk panels that re-render at 10 Hz must not rebuild clickable children every frame (see the hints signature).
+- Export changes: `just export <track> [--bits 16]` (downloads through the real button, checks with ffprobe + ebur128).
+- Comparisons between A/B, reference and drill clips are always loudness-matched; keep it that way.
+- `out/` is scratch output (gitignored).
+
+## Plan
+
+1. ✅ Scaffold + DOM-free analysis math
+2. ✅ Audio engine: load mp3, play, EQ/comp/limiter chain (AudioWorklet lookahead limiter), A/B, bypass
+3. ✅ Desk UI: meters, targets, keyboard knobs, `a` A/B, `b` bypass selected module, `?` explain, score
+4. ✅ WAV export (24-bit / 16-bit TPDF), verified with ffmpeg
+5. ✅ Drills (EQ, compression, limiting, stereo width; 5 levels each, streaks)
+6. ✅ Hints + reference-track comparison
+
+Since: export at the file's own sample rate, mid/side stage (stereo width + mono bass knobs), correlation and
+side/mid meters, mono check (`o`), limiting and width drills, meters for the reference while it plays,
+RMS detector option, side air shelf (mid/side EQ), undo/redo (`u`/`U`, `src/master/history.ts`),
+loudness-over-time plot in the full-song check (`Report.shortTerm`, `src/desk/curve.ts` + `loudness-plot.ts`),
+spectrum & EQ panel (`src/dsp/biquad.ts` = Web Audio biquad response, `src/desk/freq.ts`, `spectrum-view.ts`),
+GR history traces (`src/master/ring.ts`, `gr-trace.ts`), presets (`src/master/presets.ts`), `l` = Drive for
+-14 LUFS (`src/master/autogain.ts`), limiter/compressor fast paths (~2x faster renders, bit-identical output),
+draggable EQ dots (`src/desk/eq-drag.ts`), self-ticking checklist (`src/master/checklist.ts`), band solo (`s`,
+a bandpass on the engine's monitor path; meters and analysers tap before it, so soloing never changes readings),
+snapshot compare (`c` save / `x` hear / `X` swap: a second `buildChain` fed by the same source, matched to the master's
+short-term loudness like the original; `just render ... --live` checks it), session JSON files (header `session ▾`),
+multiband module (`multi`, between EQ and Compressor; modules are `MODULES` in signal order, so Tab goes EQ → Multiband →
+Compressor → Limiter; build bypass objects with `noBypass()`), auto-master (`A` / `just automaster`; the no-reference
+tonal target is `tiltedShares(ANALYSER_TILT_DB_PER_OCT)` in `spectrum.ts`; tests check its plans trip no hint warning).
+`window.__engine` is exposed for probes: tap private nodes (e.g. `stereoOut`) with an AnalyserNode and compare
+output/input spectra at the same time (music changes too fast for before/after readings).
+
+Perf: a render of a 3 min song takes ~4 s in headless Chrome (~5.5 s with the multiband active); auto-master ~35 s. DSP speed-ups must stay bit-identical; compare old vs
+new on a real song (copy the old class into `out/`, process the same PCM through both, count differing samples).
+Memory: the Desk keeps only the master of a render (`MasterAudio`); `l` keeps only its closest render.
+
+Hints must not contradict each other: a suggestion stops short of what another hint warns about (width < 150%,
+EQ within ±5.5 dB); tests apply each suggestion and check no warning appears.
+
+Ideas not built: multiband presets / drills, auto-master genre targets (EDM is meant to be sub-heavy; without a
+reference the generic target trims it).

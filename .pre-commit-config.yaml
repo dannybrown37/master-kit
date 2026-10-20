@@ -1,0 +1,20 @@
+repos:
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: npx eslint --max-warnings 0
+        language: system
+        files: \.(ts|js)$
+      - id: typecheck
+        name: typecheck
+        entry: npx tsc --noEmit
+        language: system
+        pass_filenames: false
+        files: \.ts$
+      - id: test
+        name: vitest
+        entry: npx vitest run
+        language: system
+        pass_filenames: false
+        files: \.ts$

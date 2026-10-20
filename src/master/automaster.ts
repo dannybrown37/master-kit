@@ -1,0 +1,169 @@
+/**
+ * Auto-master: a first master planned from the song's own measurements (and a reference, if any), with a reason for
+ * every move. The plan is deliberately gentle: half of each tonal gap, a little glue, nothing past what the hints
+ * warn about. Limiter Drive is left to a render loop (`matchLoudness`), the only way to know the final loudness.
+ */
+import type { Report } from "../analysis/report.ts";
+import { ANALYSER_TILT_DB_PER_OCT, BANDS, relativeGaps, tiltedShares } from "../analysis/spectrum.ts";
+import { TARGETS } from "../analysis/targets.ts";
+import { GENTLE_GLUE, applyPreset } from "./presets.ts";
+import { MB_OFF_DB, MB_THRESHOLDS, clampParam, defaultSettings, formatParam, noBypass } from "./settings.ts";
+import type { Bypass, ParamKey, Settings } from "./settings.ts";
+
+export interface PlanInput {
+  original: Report;
+  reference?: Report | null;
+}
+
+export interface Plan {
+  settings: Settings;
+  bypass: Bypass;
+  /** One line per decision: what was set and why. */
+  steps: string[];
+}
+
+/** A tonal gap smaller than this is taste, not a problem. */
+const EQ_ACT_DB = 2;
+/** A band this much lighter than the target is treated as absent, not as something to boost. */
+const MISSING_DB = 10;
+/** From this gap the band's level is also controlled dynamically (multiband), and the EQ does less. */
+const MULTIBAND_ACT_DB = 4;
+/** Largest EQ move: a reference is a trustworthy target, a generic curve less so. */
+const EQ_CAP_REFERENCE_DB = 3;
+const EQ_CAP_GENERIC_DB = 2;
+/** Below this PLR the mix is already dense: more compression only flattens it. */
+const DENSE_PLR_DB = 9;
+const WIDTH_GAP_DB = 4;
+const WIDTH_RANGE: [number, number] = [70, 130];
+const OUT_OF_PHASE_WIDTH = 80;
+const MONO_BASS_HZ = 100;
+const MB_RATIO = 2.5;
+const MB_HIGH_SPLIT_HZ = 5000;
+/** Easing compression for dynamics: the glue drops to this ratio, thresholds rise this much. */
+const EASED_RATIO = 1.5;
+const EASE_DB = 3;
+
+const f1 = (x: number): string => x.toFixed(1);
+const signedDb = (x: number): string => `${x > 0 ? "+" : ""}${f1(x)} dB`;
+const heavy = (gap: number): string => `${signedDb(gap)} ${gap > 0 ? "heavy" : "light"}`;
+
+function bandIndex(key: string): number {
+  return BANDS.findIndex((b) => b.key === key);
+}
+
+/** Power sum of bands, as a share in dB. */
+function shareOf(r: Report, keys: string[]): number {
+  return 10 * Math.log10(keys.reduce((sum, k) => sum + 10 ** (r.bands[bandIndex(k)].db / 10), 0));
+}
+
+export function planMaster({ original: o, reference: ref = null }: PlanInput): Plan {
+  const s = defaultSettings();
+  const bypass = noBypass();
+  const steps: string[] = [];
+  const set = (key: ParamKey, value: number): number => (s[key] = clampParam(key, value));
+
+  const target = ref ? ref.bands.map((b) => b.db) : tiltedShares(ANALYSER_TILT_DB_PER_OCT);
+  const gaps = relativeGaps(
+    o.bands.map((b) => b.db),
+    target,
+  );
+  const against = ref ? "the reference" : `a balanced spectrum (flat on the ${ANALYSER_TILT_DB_PER_OCT} dB/oct analyser; a reference gives a better target)`;
+  const cap = ref ? EQ_CAP_REFERENCE_DB : EQ_CAP_GENERIC_DB;
+  steps.push(`Tone vs ${against}: ${o.bands.map((b, i) => `${b.label} ${signedDb(gaps[i])}`).join(", ")}.`);
+  // A band this far under the target is (nearly) empty: a boost there only lifts rumble or hiss.
+  const missing = new Set(BANDS.filter((_, i) => gaps[i] <= -MISSING_DB).map((b) => b.key));
+  for (const b of BANDS.filter((x) => missing.has(x.key))) {
+    steps.push(`${b.label}: almost nothing there (${signedDb(gaps[bandIndex(b.key)])}): EQ can't add what isn't in the mix, so it's left alone.`);
+  }
+  const gap = (key: string): number => (missing.has(key) ? 0 : gaps[bandIndex(key)]);
+  const meanGap = (keys: string[]): number => {
+    const present = keys.filter((k) => !missing.has(k));
+    return present.length ? present.reduce((sum, k) => sum + gap(k), 0) / present.length : 0;
+  };
+  const lowGap = meanGap(["sub", "low"]);
+  const highGap = meanGap(["presence", "air"]);
+
+  // Multiband: a band that's far too heavy usually is so on its loud notes; compressing it there keeps the rest intact.
+  // The threshold sits at the band's average level (overall RMS + its share), so only its louder moments are turned down.
+  const rms = o.samplePeak - o.crest;
+  const multiband = { low: lowGap >= MULTIBAND_ACT_DB, high: highGap >= MULTIBAND_ACT_DB };
+  if (multiband.low || multiband.high) {
+    set("mbRatio", MB_RATIO);
+    if (multiband.high) set("mbHighHz", MB_HIGH_SPLIT_HZ);
+  }
+  for (const [band, keys, knob, what] of [
+    ["low", ["sub", "low"], "mbLowThreshold", "the kick and bass"],
+    ["high", ["presence", "air"], "mbHighThreshold", "cymbals and sibilance"],
+  ] as const) {
+    if (!multiband[band]) continue;
+    const t = set(knob, Math.min(MB_OFF_DB - 0.5, rms + shareOf(o, [...keys])));
+    const g = band === "low" ? lowGap : highGap;
+    steps.push(`Multiband: the ${band} band is ${heavy(g)}, so it's compressed ${formatParam("mbRatio", s.mbRatio)} above ${formatParam(knob, t)} (its average level): ${what} come down on their loudest notes only.`);
+  }
+
+  // EQ: half the gap (the rest is taste or the mix's job), less where the multiband already acts.
+  const eqMove = (g: number, shared: boolean): number => {
+    if (Math.abs(g) < EQ_ACT_DB) return 0;
+    const move = Math.max(-cap, Math.min(cap, -g / (shared ? 4 : 2)));
+    return Math.round(move * 2) / 2;
+  };
+  const lowShelfHz = gap("sub") - gap("low") > 3 ? 60 : gap("low") - gap("sub") > 3 ? 150 : 100;
+  const moves: { knob: ParamKey; name: string; gap: number; shared: boolean; freq?: [ParamKey, number] }[] = [
+    { knob: "eqLowGain", name: "low shelf", gap: lowGap, shared: multiband.low, freq: ["eqLowFreq", lowShelfHz] },
+    { knob: "eqMudGain", name: "mud band", gap: gap("mud"), shared: false, freq: ["eqMudFreq", 350] },
+    { knob: "eqPresGain", name: "presence band", gap: gap("presence"), shared: multiband.high, freq: ["eqPresFreq", 3500] },
+    { knob: "eqAirGain", name: "air shelf", gap: gap("air"), shared: multiband.high },
+  ];
+  let flat = true;
+  for (const { knob, name, gap: g, shared, freq } of moves) {
+    const move = eqMove(g, shared);
+    if (move === 0) continue;
+    flat = false;
+    set(knob, move);
+    if (freq) set(...freq);
+    const at = freq ? ` at ${formatParam(freq[0], s[freq[0]])}` : "";
+    const share = shared ? "a quarter of the gap; the multiband does the rest" : `half the gap, at most ${cap} dB: mastering EQ stays gentle`;
+    steps.push(`EQ: ${name} ${formatParam(knob, s[knob])}${at} for a ${heavy(g)} range (${share}).`);
+  }
+  if (flat) steps.push(`EQ: flat. No band is ${EQ_ACT_DB} dB or more off, so the tone is left to the mix.`);
+
+  // Stereo.
+  set("eqMonoBassHz", MONO_BASS_HZ);
+  steps.push(`Stereo: bass below ${MONO_BASS_HZ} Hz to mono. Nobody hears direction down there, and it keeps the low end solid on club systems.`);
+  const sideGap = ref ? o.stereo.sideDb - ref.stereo.sideDb : NaN;
+  if (Number.isFinite(sideGap) && Math.abs(sideGap) >= WIDTH_GAP_DB) {
+    const width = Math.max(WIDTH_RANGE[0], Math.min(WIDTH_RANGE[1], Math.round((100 * 10 ** (-sideGap / 20)) / 5) * 5));
+    set("eqWidth", width);
+    steps.push(`Stereo: ${sideGap > 0 ? "wider" : "narrower"} than the reference (side ${f1(o.stereo.sideDb)} vs ${f1(ref?.stereo.sideDb ?? NaN)} dB) → width ${formatParam("eqWidth", s.eqWidth)}.`);
+  } else if (!ref && o.stereo.correlation < 0) {
+    set("eqWidth", OUT_OF_PHASE_WIDTH);
+    steps.push(`Stereo: correlation ${o.stereo.correlation.toFixed(2)} means parts cancel in mono → width ${formatParam("eqWidth", s.eqWidth)}.`);
+  }
+
+  // Glue compression.
+  if (o.plr < DENSE_PLR_DB) {
+    steps.push(`Compressor: off. PLR is already ${f1(o.plr)} dB (dense); more compression would only flatten it.`);
+  } else {
+    const glue = applyPreset(GENTLE_GLUE, o.integrated);
+    for (const key of Object.keys(glue) as ParamKey[]) if (key.startsWith("comp")) set(key, glue[key]);
+    steps.push(`Compressor: gentle glue (${formatParam("compRatio", s.compRatio)}, RMS, slow attack, sidechain ${formatParam("compSidechainHz", s.compSidechainHz)}), threshold ${formatParam("compThreshold", s.compThreshold)}: 3 dB under the song's loudness, so it rides the loud parts by 1–3 dB.`);
+  }
+
+  set("limCeiling", TARGETS.truePeakMax);
+  set("limDrive", TARGETS.integrated - o.integrated);
+  steps.push(`Limiter: ceiling ${formatParam("limCeiling", s.limCeiling)} (safe for mp3/AAC encoding).`);
+  return { settings: s, bypass, steps };
+}
+
+/** Softer dynamics for when the master lost too much PLR: the glue compressor first, then the multiband. Null: nothing left to ease. */
+export function easeDynamics(s: Settings): Settings | null {
+  if (s.compRatio > EASED_RATIO && s.compThreshold < 0) {
+    return { ...s, compRatio: EASED_RATIO, compThreshold: clampParam("compThreshold", s.compThreshold + EASE_DB) };
+  }
+  if (MB_THRESHOLDS.some((k) => s[k] < MB_OFF_DB)) {
+    const out = { ...s };
+    for (const k of MB_THRESHOLDS) if (s[k] < MB_OFF_DB) out[k] = clampParam(k, Math.min(MB_OFF_DB, s[k] + EASE_DB));
+    return out;
+  }
+  return null;
+}
