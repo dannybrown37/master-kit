@@ -127,7 +127,7 @@ export class SpectrumView {
 
     g.strokeStyle = cssVar("--line");
     g.fillStyle = cssVar("--text-muted");
-    g.font = `${10 * dpr}px "IBM Plex Mono", monospace`;
+    g.font = `${10 * dpr}px "DM Mono", monospace`;
     g.lineWidth = 1;
     for (const f of GRID_HZ) {
       g.beginPath();

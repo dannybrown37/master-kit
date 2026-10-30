@@ -23,7 +23,7 @@ export class LoudnessPlot {
     this.canvas = h("canvas");
     this.playhead = h("div", "playhead");
     this.el = h("div", "plot", this.canvas, this.playhead);
-    this.el.title = "Short-term loudness over the song: blue = original, amber = master, violet dashes = reference (integrated). Click to seek.";
+    this.el.title = "Short-term loudness over the song: blue = original, lilac = master, sand dashes = reference (integrated). Click to seek.";
     this.el.onclick = (ev): void => {
       const rect = this.el.getBoundingClientRect();
       if (this.duration > 0 && rect.width > 0) onSeek(((ev.clientX - rect.left) / rect.width) * this.duration);
@@ -51,7 +51,7 @@ export class LoudnessPlot {
     g.fillRect(0, y(this.zone[1]), width, y(this.zone[0]) - y(this.zone[1]));
     g.strokeStyle = cssVar("--line");
     g.fillStyle = cssVar("--text-muted");
-    g.font = `${10 * devicePixelRatio}px "IBM Plex Mono", monospace`;
+    g.font = `${10 * devicePixelRatio}px "DM Mono", monospace`;
     for (const lufs of GRID_LUFS) {
       g.beginPath();
       g.moveTo(0, y(lufs));

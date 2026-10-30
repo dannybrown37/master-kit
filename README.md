@@ -30,31 +30,34 @@ Songs come from `MUSIC_DIR` (default `../deluge-quest/web/public/audio`); the ap
 
 ## The Desk
 
+Keyboard first: `/` (or Ctrl+K) opens a command palette over every song, reference, genre, preset and action, and
+`?` lists every key. Buttons show their key, so one click teaches it.
+
 ```
-┌ MASTER KIT [Desk|Drills|Album] [song ▾] [file]                                                       ┐
-│ [reference ▾] [file] [genre ▾] [preset ▾] [auto-master] [shootout] [session ▾]                       │
-│ ▶ 0:31 / 3:11 ━━━━━━━━  MASTER  [A/B] [Ref] [Mono] [streaming] [snap] [vs snap] [measure] [export]  │
-├ EQ ───────────┬ Multiband ───────┬ Compressor ────┬ Meters ───────────────────────────────────────┤
-│ > Low freq    │ Low/Mid/High     │ Threshold ...  │ Momentary / Short-term / Integrated (LUFS)    │
-│   Low gain    │   threshold+gain │ GR ▇ ▀█▀▀ 10 s │   ░target zone -15..-13░  | = original        │
-│   ...         │ Splits · Ratio   ├ Color ─────────┤ True peak (dBTP)  ┃-1 limit                    │
-│ Width · Mono  │ Attack · Release │ Warmth · Clip  │ Correlation · Side/mid · live score           │
-│   bass · Side │ Low/Mid/High GR  ├ Limiter ───────┼ Edges ────────────────────────────────────────┤
-├ Tamer ────────┤ ▀█▀▀█▀ last 10 s │ Drive · Ceiling│ Lead-in · Fade-in · Fade-out · Tail           │
-│ 2 bands · Q   │                  │ GR ▇ ▀▀█▀ 10 s │                                               │
-├ Spectrum & EQ: live spectrum (bars = what you hear, line = comparison, loudness-matched) + EQ curve ┤
-├ Checklist (ticks itself) ───────────┬ Full-song check: score /100, original · master · Δ · reference┤
-│ Hints (click to apply) · Explain (?)│ loudness 40 · peaks 30 · dynamics 30; loudness-over-time plot; │
-│                                     │ tonal bands                                                    │
-└─────────────────────────────────────┴────────────────────────────────────────────────────────────────┘
+┌ Master Kit [Desk|Drills|Album]  Song Barrel Rondo t · Ref none R · Genre EDM·auto G   [Commands /] [?] ┐
+│ [Play space] 0:31 / 3:11 ━━━━━━━  MASTER  [A/B a][Ref r][Mono o][Stream p][Snap c][vs Snap x]          │
+│                                                               [Auto A][Measure m][Export e]            │
+├ 1 EQ        ● ┬ Compressor ───────────────────────────────┬ Meters ──────────────────────────────────┤
+│ 2 Tamer       │ Threshold ━━━━○──  -18 dB │ Release  ...  │ Momentary / Short-term / Integrated LUFS │
+│ 3 Multiband   │ Ratio     ━○─────  2.0:1  │ Makeup   ...  │ True peak · Correlation · Side/mid       │
+│ 4 Compressor●-2.1 GR ▇  ▀█▀▀ last 10 s                    ├ Hints (h applies the top one) ───────────┤
+│ 5 Color       ├ what the selected knob does (i hides)     │                                          │
+│ 6 Limiter     ├ Spectrum & EQ: bars = what you hear,      ├ Checklist (ticks itself) ────────────────┤
+│ 7 Edges   off │   line = comparison, EQ curve + dots      │                                          │
+├ Full-song check: score /100, original · master · Δ · reference; loudness over time; streaming gains   ┤
+└────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+  rail: ● = changed from default, off = bypassed, −2.1 = live gain reduction
 ```
 
 | Key | Does |
 | --- | --- |
+| `/` or Ctrl+K | command palette: type part of a song, setting or action, Enter runs it |
+| `t` `R` `G` `P` | palette opened on songs / references / genres / presets |
+| `?` | every key, grouped |
 | space | play / pause |
 | ↑ ↓ | select knob · ← → adjust (shift: fine) · `0` reset knob · double-click resets, drag the bar sets |
 | `u` / `U` | undo / redo knob changes (quick turns of one knob are one step) |
-| tab / shift-tab | next / previous module |
+| tab / shift-tab, `1`–`7` | next / previous module, or straight to one (signal order) |
 | `a` | A/B: the original, turned to the master's loudness (so "louder" can't win) |
 | `r` | listen to the reference, turned to the master's loudness; the meters then show the reference (│ = master) |
 | `b` | bypass the selected module |
@@ -69,9 +72,9 @@ Songs come from `MUSIC_DIR` (default `../deluge-quest/web/public/audio`); the ap
 | `s` | solo the selected EQ band: hear only its frequencies (+6 dB), follows the band as you move it; finds mud fast |
 | `e` / `E` | export WAV, 24-bit / 16-bit with TPDF dither, at the song file's own sample rate |
 | `,` `.` / Home | seek ±5 s / start · `z` restart the live meters |
-| `?` | explanations on/off · `d` drills |
+| `i` | explanations on/off · `d` drills |
 
-Knob settings are saved per song in localStorage. **session ▾** (header) saves them to a JSON file or loads one back
+Knob settings are saved per song in localStorage. The palette's **Save session / Load a session file** write them to a JSON file or load one back
 (validated and clamped like stored settings; `u` undoes a load), for backups or another browser.
 
 **Multiband** (between EQ and Compressor): a Linkwitz-Riley crossover (24 dB/oct; the bands sum back flat) splits the
@@ -103,7 +106,7 @@ goes mono below 100 Hz, width follows the reference (70–130%), gentle glue com
 (PLR < 9), ceiling −1 dBTP. Then it renders to set Drive for −14 LUFS, and if the dynamics score fails it eases the
 compression once and renders again. It's a starting point to A/B, not a verdict. The CLI runs the same code in headless
 Chrome and can write the WAV and a session file to load in the Desk.
-It is **genre-aware** (header `genre ▾`; default from the `[year, genre]` tag in the file name, e.g. `[2025, edm]`):
+It is **genre-aware** (`G`, or the header's Genre; default from the `[year, genre]` tag in the file name, e.g. `[2025, edm]`):
 each style shifts the tonal target (EDM keeps a big sub, lo-fi a dark top), decides glue (ambient, cinematic and
 acoustic keep their dynamics), warmth, soft clipping and mono bass (`src/master/genres.ts`; rules of thumb, a reference
 overrides the tone). It also aims the Tamer at harsh resonances and sets Edges. Your **shootout picks** lean it toward
@@ -138,7 +141,7 @@ mono check, export), ticked automatically from what you've listened to and measu
 **GR history**: under each GR meter, the last 10 s of gain reduction while playing. Regular deep dips on every kick
 mean the compressor is pumping.
 
-**Loudness over the song** (full-song check): short-term loudness of the original (blue) and the measured master (amber)
+**Loudness over the song** (full-song check): short-term loudness of the original (blue) and the measured master (lilac)
 across the whole song, the target zone shaded and the reference's integrated loudness dashed. Click it to seek.
 
 **Score** (full song): loudness 40 (−14 LUFS ±1, falling to 0 at 4 LU off), true peak 30 (≤ −1 dBTP, 0 at 0 dBTP),

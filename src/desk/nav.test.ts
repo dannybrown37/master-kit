@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { initialNav, knobsOf, moveKnob, moveModule, selectKnob, selected } from "./nav.ts";
+import { initialNav, jumpModule, knobsOf, moveKnob, moveModule, selectKnob, selected } from "./nav.ts";
 
 describe("desk navigation", () => {
   it("starts on the first EQ knob", () => {
@@ -24,6 +24,16 @@ describe("desk navigation", () => {
     ["seven tabs come back to EQ", 7, "eq"],
   ] as const)("%s", (_name, delta, want) => {
     expect(moveModule(initialNav(), delta).module).toBe(want);
+  });
+
+  it.each([
+    [0, "eq"],
+    [3, "comp"],
+    [6, "edges"],
+    [7, "eq"],
+    [-1, "eq"],
+  ] as const)("jumpModule(%i) goes to %s, out of range stays put", (index, want) => {
+    expect(jumpModule(initialNav(), index).module).toBe(want);
   });
 
   it("remembers the knob in each module", () => {

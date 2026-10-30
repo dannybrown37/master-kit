@@ -25,7 +25,7 @@ import type { Preset } from "../master/presets.ts";
 import { EDGE_KEYS, MODULES, MODULE_NAMES, PARAMS, changedParams, clampParam, defaultSettings, edgeParams, eqBands, formatParam, fromFraction, nudge, toFraction } from "../master/settings.ts";
 import type { Bypass, Module, ParamKey, Settings } from "../master/settings.ts";
 import { snapshotDiff } from "../master/snapshot.ts";
-import { GENRES, genre, genreFromName, parseGenre } from "../master/genres.ts";
+import { GENRES, genre, genreFromName } from "../master/genres.ts";
 import type { GenreKey } from "../master/genres.ts";
 import { PLATFORMS, masterLoudness, nextPlatform, platform, playbackGainDb } from "../master/streaming.ts";
 import type { PlatformKey } from "../master/streaming.ts";
@@ -36,11 +36,13 @@ import type { BitDepth } from "../export/wav.ts";
 import { AlbumView } from "../album/view.ts";
 import { DrillView } from "../drills/view.ts";
 import { trackUrl } from "../audio/tracks.ts";
-import { pickAudioFile } from "../master/library.ts";
-import { MeterBar, button, clock, db, download, h, signed } from "./dom.ts";
+import { pickAudioFile, songTitle } from "../master/library.ts";
+import { MeterBar, button, clock, db, download, h, keyButton, setLabel, signed } from "./dom.ts";
+import { Palette } from "./palette.ts";
+import type { Command } from "./palette.ts";
 import { GrTrace } from "./gr-trace.ts";
 import { LoudnessPlot } from "./loudness-plot.ts";
-import { initialNav, knobsOf, moveKnob, moveModule, selectKnob, selected } from "./nav.ts";
+import { initialNav, jumpModule, knobsOf, moveKnob, moveModule, selectKnob, selected } from "./nav.ts";
 import type { Nav } from "./nav.ts";
 import { lastReference, lastTrack, loadSettings, loadTaste, saveLastReference, saveLastTrack, saveSettings, saveTaste } from "./storage.ts";
 
@@ -56,6 +58,66 @@ const TP_RANGE: [number, number] = [-12, 3];
 const GR_MAX = 12;
 const SIDE_RANGE: [number, number] = [-30, 0];
 const TARGET_ZONE: [number, number] = [TARGETS.integrated - TARGETS.integratedTolerance, TARGETS.integrated + TARGETS.integratedTolerance];
+
+/** The `?` overlay. Space-separated keys render as separate caps. */
+const KEY_GROUPS: [string, [string, string][]][] = [
+  [
+    "Find anything",
+    [
+      ["/", "command palette (also Ctrl+K)"],
+      ["t", "pick a song"],
+      ["R", "pick a reference"],
+      ["G", "pick a genre"],
+      ["P", "start from a preset"],
+      ["?", "this list"],
+    ],
+  ],
+  [
+    "Knobs",
+    [
+      ["Tab 1–7", "module (Shift+Tab back)"],
+      ["↑ ↓", "knob"],
+      ["← →", "turn it (Shift: fine)"],
+      ["0", "reset knob"],
+      ["b", "bypass module"],
+      ["u U", "undo / redo"],
+      ["i", "explanations on / off"],
+    ],
+  ],
+  [
+    "Listen",
+    [
+      ["space", "play / pause"],
+      [", .", "back / forward 5 s"],
+      ["a", "A/B with the original"],
+      ["r", "the reference"],
+      ["o", "mono"],
+      ["p", "streaming preview"],
+      ["s", "solo EQ band"],
+    ],
+  ],
+  [
+    "Compare",
+    [
+      ["c", "save snapshot"],
+      ["x", "hear snapshot"],
+      ["X", "swap snapshot and knobs"],
+      ["v", "blind shootout (1 2 3, Enter)"],
+    ],
+  ],
+  [
+    "Master",
+    [
+      ["A", "auto-master"],
+      ["h", "apply top hint"],
+      ["l", `Drive for ${TARGETS.integrated} LUFS`],
+      ["m", "measure the whole song"],
+      ["z", "restart the meters"],
+      ["e E", "export WAV 24 / 16-bit"],
+    ],
+  ],
+  ["Modes", [["d", "desk / drills"]]],
+];
 
 interface KnobView {
   row: HTMLElement;
@@ -92,6 +154,11 @@ export function settingsKey(settings: Settings, bypass: Bypass): string {
   return JSON.stringify([rendered, { ...bypass, edges: false }]);
 }
 
+/** A panel heading's shortcut: the key cap, then what it does. */
+function headKey(key: string, what: string): HTMLElement {
+  return h("span", "kbd", h("kbd", "", key), ` ${what}`);
+}
+
 export function channelsOf(buffer: AudioBuffer): Float32Array[] {
   return Array.from({ length: Math.max(2, buffer.numberOfChannels) }, (_, c) => buffer.getChannelData(Math.min(c, buffer.numberOfChannels - 1)));
 }
@@ -109,7 +176,6 @@ export class Desk {
   private nav: Nav = initialNav();
   private readonly history = new History<Settings>();
   private readonly checklistEl: HTMLElement;
-  private readonly refRow: HTMLElement;
   private checklistSignature = "";
   private explainSignature: string | null = null;
   private meterHelp: HTMLElement | null = null;
@@ -154,9 +220,15 @@ export class Desk {
   private messageIsError = false;
   private pending = false;
 
-  private readonly trackSelect: HTMLSelectElement;
-  private readonly refSelect: HTMLSelectElement;
-  private readonly genreSelect: HTMLSelectElement;
+  private readonly tracks: string[];
+  private readonly palette = new Palette();
+  private readonly keysDialog: HTMLDialogElement;
+  private readonly songCrumb: HTMLButtonElement;
+  private readonly refCrumb: HTMLButtonElement;
+  private readonly genreCrumb: HTMLButtonElement;
+  private readonly sessionFile: HTMLInputElement;
+  private readonly rail = new Map<Module, HTMLElement>();
+  private readonly helpEl: HTMLElement;
   /** Picked by hand; null = from the file name. */
   private genreOverride: GenreKey | null = null;
   /** A running blind shootout: versions by style, played in `order`; `before` = the knobs to go back to on cancel. */
@@ -198,7 +270,6 @@ export class Desk {
   private readonly scoreEl: HTMLElement;
   protected readonly lower: HTMLElement;
   protected readonly deskEl: HTMLElement;
-  private readonly keysEl: HTMLElement;
   private readonly drills: DrillView;
   private readonly album: AlbumView;
   private readonly modeButtons: Record<Mode, HTMLButtonElement>;
@@ -209,13 +280,11 @@ export class Desk {
     this.engine = engine;
     this.state = engine.state;
 
-    this.trackSelect = h("select");
-    this.trackSelect.title = "Songs in MUSIC_DIR";
-    this.trackSelect.replaceChildren(...tracks.map((t) => new Option(t, t)));
-    this.trackSelect.onchange = (): void => this.run(this.loadTrack(this.trackSelect.value));
+    this.tracks = tracks;
     this.fileInput = h("input");
     this.fileInput.type = "file";
     this.fileInput.accept = "audio/*";
+    this.fileInput.hidden = true;
     this.fileInput.onchange = (): void => {
       const file = this.fileInput.files?.[0];
       if (file) this.loadFile(file);
@@ -228,39 +297,35 @@ export class Desk {
     });
     this.messageEl = h("span", "message");
 
-    this.playButton = button("▶ play", () => this.run(this.engine.toggle()), "space");
+    this.playButton = keyButton("Play", "space", () => this.run(this.engine.toggle()), "play / pause");
+    this.playButton.classList.add("play");
     this.timeEl = h("span", "time");
     this.progressFill = h("div", "fill");
     const progress = h("div", "progress", this.progressFill);
-    progress.title = "click to seek (, and . jump 5 s)";
+    progress.title = "click to seek (, and . jump 5 s, Home to the top)";
     progress.onclick = (ev): void => {
       const rect = progress.getBoundingClientRect();
       this.run(this.engine.seek(((ev.clientX - rect.left) / rect.width) * this.state.duration));
     };
     this.listenEl = h("span", "listen");
-    this.abButton = button("A/B", () => this.engine.toggleAB(), "a: hear the original at matched loudness");
-    this.measureButton = button("measure song", () => this.run(this.measureMaster()), "m: render the whole song offline and score it");
-    this.exportButton = button("export WAV", () => this.run(this.exportWav(24)), "e: 24-bit WAV · E: 16-bit dithered");
-    this.refButton = button("Ref", () => this.engine.toggleReference(), "r: hear the reference at the master's loudness");
-    this.monoButton = button("Mono", () => this.engine.toggleMono(), "o: listen summed to mono (phone speaker, club PA)");
-    this.streamButton = button("streaming", () => this.cycleStream(), "p: hear it the way Spotify / Apple Music / YouTube play it back (their loudness normalization)");
-    const saveSnap = button("snap", () => this.saveSnapshot(), "c: save these knobs as a snapshot to compare against");
-    this.snapButton = button("vs snap", () => this.toggleSnapshot(), "x: hear the snapshot at the master's loudness · X: swap it with your knobs");
+    this.abButton = keyButton("A/B", "a", () => this.engine.toggleAB(), "hear the original at matched loudness");
+    this.measureButton = keyButton("Measure", "m", () => this.run(this.measureMaster()), "render the whole song offline and score it");
+    this.exportButton = keyButton("Export", "e", () => this.run(this.exportWav(24)), "24-bit WAV (E: 16-bit dithered)");
+    this.exportButton.classList.add("primary");
+    this.refButton = keyButton("Ref", "r", () => this.engine.toggleReference(), "hear the reference at the master's loudness");
+    this.monoButton = keyButton("Mono", "o", () => this.engine.toggleMono(), "listen summed to mono (phone speaker, club PA)");
+    this.streamButton = keyButton("Stream", "p", () => this.cycleStream(), "hear it the way Spotify / Apple Music / YouTube play it back (their loudness normalization)");
+    const saveSnap = keyButton("Snap", "c", () => this.saveSnapshot(), "save these knobs as a snapshot to compare against");
+    this.snapButton = keyButton("vs Snap", "x", () => this.toggleSnapshot(), "hear the snapshot at the master's loudness (X: swap it with your knobs)");
+    const auto = keyButton("Auto", "A", () => this.run(this.autoMaster()), "auto-master: plan a master from this song's measurements (and the reference), with the reason for each knob");
     this.toolbar = h(
       "div",
-      "row",
-      this.playButton,
-      this.timeEl,
+      "transport",
+      h("div", "group", this.playButton, this.timeEl),
       progress,
       this.listenEl,
-      this.abButton,
-      this.refButton,
-      this.monoButton,
-      this.streamButton,
-      saveSnap,
-      this.snapButton,
-      this.measureButton,
-      this.exportButton,
+      h("div", "group", this.abButton, this.refButton, this.monoButton, this.streamButton, saveSnap, this.snapButton),
+      h("div", "group", auto, this.measureButton, this.exportButton),
     );
 
     this.drills = new DrillView(engine.ctx, () => engine.loaded);
@@ -268,7 +333,6 @@ export class Desk {
       pauseDesk: () => engine.pause(),
       openInDesk: (track) => {
         this.setMode("desk");
-        this.trackSelect.value = track;
         this.run(this.loadTrack(track));
       },
     });
@@ -277,57 +341,56 @@ export class Desk {
       drills: button("Drills", () => this.setMode("drills"), "d: switch desk / drills"),
       album: button("Album", () => this.setMode("album"), "master several songs alike and export them in order"),
     };
-    const tabs = h("span", "row tabs", this.modeButtons.desk, this.modeButtons.drills, this.modeButtons.album);
-    this.refSelect = h("select");
-    this.refSelect.title = "Reference track: a finished song you want yours to sit next to";
-    this.refSelect.replaceChildren(new Option("reference: none", ""), ...tracks.map((t) => new Option(`ref: ${t}`, t)));
-    this.refSelect.onchange = (): void => this.run(this.loadReferenceTrack(this.refSelect.value));
+    const tabs = h("nav", "tabs", this.modeButtons.desk, this.modeButtons.drills, this.modeButtons.album);
+    tabs.setAttribute("aria-label", "Mode");
     this.refFile = h("input");
     this.refFile.type = "file";
     this.refFile.accept = "audio/*";
-    this.refFile.title = "Reference from a file";
+    this.refFile.hidden = true;
     this.refFile.onchange = (): void => {
       const file = this.refFile.files?.[0];
       if (file) this.run(file.arrayBuffer().then((data) => this.loadReference(file.name, data)));
     };
-    const presetSelect = h("select");
-    presetSelect.title = "Load a starting point (u undoes it)";
-    presetSelect.replaceChildren(new Option("start from a preset…", ""), ...PRESETS.map((p) => new Option(p.name, p.name)));
-    presetSelect.onchange = (): void => {
-      const preset = PRESETS.find((p) => p.name === presetSelect.value);
-      presetSelect.value = "";
-      presetSelect.blur();
-      if (preset) this.applyPreset(preset);
-    };
-    const sessionFile = h("input");
-    sessionFile.type = "file";
-    sessionFile.accept = ".json,application/json";
-    sessionFile.hidden = true;
-    sessionFile.onchange = (): void => {
-      const file = sessionFile.files?.[0];
-      sessionFile.value = "";
+    this.sessionFile = h("input");
+    this.sessionFile.type = "file";
+    this.sessionFile.accept = ".json,application/json";
+    this.sessionFile.hidden = true;
+    this.sessionFile.onchange = (): void => {
+      const file = this.sessionFile.files?.[0];
+      this.sessionFile.value = "";
       if (file) this.run(this.loadSession(file));
     };
-    const session = h("select");
-    session.title = "Session file: these knobs as JSON, to keep or load in another browser";
-    session.replaceChildren(new Option("session…", ""), new Option("save to file", "save"), new Option("load from file (u undoes)", "load"));
-    session.onchange = (): void => {
-      const action = session.value;
-      session.value = "";
-      session.blur();
-      if (action === "save") this.saveSession();
-      if (action === "load") sessionFile.click();
+    const crumb = (what: string, key: string, group: string): HTMLButtonElement => {
+      const b = h("button", "crumb", h("span", "crumb-label", what), h("span", "crumb-value"), h("kbd", "", key));
+      b.type = "button";
+      b.title = `${what}: change it (${key})`;
+      b.onclick = (): void => this.openPalette(group);
+      return b;
     };
-    const auto = button("auto-master", () => this.run(this.autoMaster()), "A: plan a master from this song's measurements (and the reference), with the reason for each knob");
-    this.genreSelect = h("select");
-    this.genreSelect.title = "Genre for auto-master: the tonal target, glue, color and clipping a style usually wants (auto = from the [year, genre] tag in the file name)";
-    this.genreSelect.onchange = (): void => {
-      this.genreOverride = parseGenre(this.genreSelect.value);
-    };
-    this.syncGenreSelect();
-    const shootout = button("shootout", () => this.run(this.startShootout()), "v: hear three versions of the auto-master blind and pick by ear; your picks steer later auto-masters");
-    this.refRow = h("div", "row", this.refSelect, this.refFile, this.genreSelect, presetSelect, auto, shootout, session, sessionFile);
-    const header = h("header", "", h("div", "row", h("h1", "", "MASTER KIT"), tabs, this.trackSelect, this.fileInput, this.messageEl), this.refRow, this.toolbar);
+    this.songCrumb = crumb("Song", "t", "Song");
+    this.refCrumb = crumb("Ref", "R", "Reference");
+    this.genreCrumb = crumb("Genre", "G", "Genre");
+    const search = h("button", "search-button", h("span", "", "Commands"), h("kbd", "", "/"));
+    search.type = "button";
+    search.title = "Command palette: every song, setting and action (/ or Ctrl+K)";
+    search.onclick = (): void => this.openPalette();
+    const keysButton = h("button", "icon-button", "?");
+    keysButton.type = "button";
+    keysButton.title = "Keyboard shortcuts (?)";
+    keysButton.setAttribute("aria-label", "Keyboard shortcuts");
+    keysButton.onclick = (): void => this.toggleKeys();
+    const header = h(
+      "header",
+      "topbar",
+      h("h1", "", "Master Kit"),
+      tabs,
+      h("div", "crumbs", this.songCrumb, this.refCrumb, this.genreCrumb),
+      h("div", "topbar-end", search, keysButton),
+      this.fileInput,
+      this.refFile,
+      this.sessionFile,
+    );
+    this.keysDialog = this.buildKeysDialog();
 
     const modulePanels = MODULES.map((m) => this.buildPanel(m));
     const meterRows = {
@@ -345,33 +408,43 @@ export class Desk {
     const meterPanel = h(
       "section",
       "panel meters",
-      h("h2", "", "Meters", h("span", "kbd", "z: zero")),
+      h("h2", "", "Meters", headKey("z", "restart")),
       head,
       ...Object.values(meterRows).map((r) => r.row),
       this.liveScoreEl,
     );
-    // Four columns, modules in signal order down and across; more side by side would squeeze the knobs.
-    const p = Object.fromEntries(MODULES.map((m, i) => [m, modulePanels[i]])) as Record<Module, HTMLElement>;
-    this.deskEl = h(
-      "main",
-      "desk",
-      h("div", "stack", p.eq, p.tame),
-      p.multi,
-      h("div", "stack", p.comp, p.color, p.limiter),
-      h("div", "stack meters-col", meterPanel, p.edges),
-    );
+    // One module open at a time: the rail picks it (Tab, 1–7), the stage shows its knobs over the spectrum.
+    const railList = h("ol", "rail-list");
+    MODULES.forEach((m, i) => {
+      const item = h("button", "rail-item", h("kbd", "", String(i + 1)), h("span", "rail-name", MODULE_NAMES[m]), h("span", "rail-state"));
+      item.type = "button";
+      item.onclick = (): void => {
+        this.nav = jumpModule(this.nav, i);
+        this.schedule();
+      };
+      railList.append(h("li", "", item));
+      this.rail.set(m, item);
+    });
+    const railEl = h("nav", "rail", railList);
+    railEl.setAttribute("aria-label", "Modules, in signal order");
 
-    this.explainEl = h("section", "panel explain");
+    this.explainEl = h("section", "explain");
     this.scoreEl = h("section", "panel scorecard");
     this.hintsEl = h("section", "panel hints");
     this.checklistEl = h("section", "panel checklist");
     this.shootEl = h("section", "panel shootout");
     this.shootEl.hidden = true;
-    this.lower = h("div", "lower", h("div", "stack", this.checklistEl, this.hintsEl, this.explainEl), this.scoreEl);
-    this.keysEl = h("footer", "keys");
-    this.keysEl.innerHTML = this.keyHelp();
+    this.deskEl = h(
+      "main",
+      "desk",
+      railEl,
+      h("div", "stage", ...modulePanels, this.explainEl, this.spectrum.el),
+      h("div", "side", meterPanel, this.hintsEl, this.checklistEl),
+    );
+    this.lower = h("div", "lower", this.scoreEl);
+    this.helpEl = h("footer", "foot", h("kbd", "", "/"), " commands · ", h("kbd", "", "?"), " every key · ", h("kbd", "", "Tab"), " ", h("kbd", "", "1–7"), " modules · ", h("kbd", "", "↑↓"), " knob · ", h("kbd", "", "←→"), " turn it");
 
-    root.replaceChildren(h("div", "app", header, this.shootEl, this.deskEl, this.spectrum.el, this.lower, this.drills.el, this.album.el, this.keysEl));
+    root.replaceChildren(h("div", "app", header, this.toolbar, this.messageEl, this.shootEl, this.deskEl, this.lower, this.drills.el, this.album.el, this.helpEl), this.palette.el, this.keysDialog);
     engine.onChange = (s): void => {
       this.state = s;
       this.schedule();
@@ -380,32 +453,94 @@ export class Desk {
     this.schedule();
   }
 
-  protected keyHelp(): string {
-    const k = (key: string, what: string): string => `<kbd>${key}</kbd> ${what}`;
+  private buildKeysDialog(): HTMLDialogElement {
+    const groups = KEY_GROUPS.map(([title, rows]) =>
+      h("section", "keys-group", h("h3", "", title), h("dl", "", ...rows.flatMap(([key, what]) => [h("dt", "", ...key.split(" ").map((k) => h("kbd", "", k))), h("dd", "", what)]))),
+    );
+    const dialog = h("dialog", "keys-dialog", h("header", "", h("h2", "", "Keyboard"), h("p", "dim", "Everything here is also in the command palette: press / and type.")), h("div", "keys-grid", ...groups));
+    dialog.setAttribute("aria-label", "Keyboard shortcuts");
+    dialog.addEventListener("click", (ev) => {
+      if (ev.target === dialog) dialog.close();
+    });
+    dialog.addEventListener("keydown", (ev) => {
+      if (ev.key === "?") {
+        ev.preventDefault();
+        dialog.close();
+      }
+    });
+    return dialog;
+  }
+
+  private toggleKeys(): void {
+    if (this.keysDialog.open) this.keysDialog.close();
+    else this.keysDialog.showModal();
+  }
+
+  /** `group`: open on one kind of thing (songs, references…); otherwise everything. */
+  private openPalette(group?: string): void {
+    const all = this.commands();
+    const list = group ? all.filter((c) => c.group === group) : all;
+    this.palette.show(list, "", group ? `Pick a ${group.toLowerCase()}` : "Type a song, a setting or a command");
+  }
+
+  private commands(): Command[] {
+    const s = this.state;
+    const cmd = (group: string, title: string, run: () => unknown, key?: string, extra: Partial<Command> = {}): Command => ({
+      id: `${group}:${title}`,
+      group,
+      title,
+      key,
+      run: () => {
+        this.run(run());
+        this.schedule();
+      },
+      ...extra,
+    });
+    const genreNow = this.genreOverride;
+    // Long lists last, so an empty palette opens on actions; typing finds a song just as fast.
+    const pickers = [
+      ...this.tracks.map((t) => cmd("Song", t, () => this.loadTrack(t), undefined, { current: t === this.track })),
+      cmd("Song", "Open an audio file…", () => this.fileInput.click(), undefined, { terms: "load browse disk" }),
+      cmd("Reference", "No reference", () => this.loadReferenceTrack(""), undefined, { current: !this.reference, terms: "none clear" }),
+      ...this.tracks.map((t) => cmd("Reference", t, () => this.loadReferenceTrack(t), undefined, { current: this.reference?.name === t })),
+      cmd("Reference", "Reference from a file…", () => this.refFile.click(), undefined, { terms: "load browse disk" }),
+      cmd("Genre", `Auto (${genre(genreFromName(this.track)).label}, from the file name)`, () => (this.genreOverride = null), undefined, { current: genreNow === null }),
+      ...GENRES.map((g) => cmd("Genre", g.label, () => (this.genreOverride = g.key), undefined, { current: genreNow === g.key })),
+      ...PRESETS.map((p) => cmd("Preset", p.name, () => this.applyPreset(p), undefined, { terms: `start ${p.about}` })),
+    ];
     return [
-      k("space", "play"),
-      k("↑↓", "knob"),
-      k("←→", "adjust (shift: fine)"),
-      k("tab", "module"),
-      k("a", "A/B"),
-      k("b", "bypass module"),
-      k("0", "reset knob"),
-      k("u / U", "undo / redo"),
-      k("?", "explain"),
-      k(", .", "seek"),
-      k("m", "measure"),
-      k("l", `Drive for ${TARGETS.integrated} LUFS`),
-      k("A", "auto-master"),
-      k("v", "blind shootout"),
-      k("r", "reference"),
-      k("o", "mono"),
-      k("p", "streaming preview"),
-      k("c / x / X", "snapshot: save / compare / swap"),
-      k("s", "solo EQ band"),
-      k("h", "apply top hint"),
-      k("e / E", "export WAV 24 / 16-bit"),
-      k("d", "drills"),
-    ].join(" · ");
+      ...MODULES.map((m, i) => cmd("Module", MODULE_NAMES[m], () => (this.nav = jumpModule(this.nav, i)), String(i + 1), { current: m === this.nav.module })),
+      cmd("Listen", s.playing ? "Pause" : "Play", () => this.engine.toggle(), "space"),
+      cmd("Listen", "A/B against the original", () => this.engine.toggleAB(), "a"),
+      cmd("Listen", "Hear the reference", () => this.engine.toggleReference(), "r"),
+      cmd("Listen", "Mono check", () => this.engine.toggleMono(), "o"),
+      cmd("Listen", "Streaming preview (next platform)", () => this.cycleStream(), "p", { terms: "spotify apple youtube" }),
+      cmd("Listen", "Solo the selected EQ band", () => this.toggleSolo(), "s"),
+      cmd("Listen", "Back to the top", () => this.engine.seek(0), "Home"),
+      cmd("Snapshot", "Save snapshot", () => this.saveSnapshot(), "c"),
+      cmd("Snapshot", "Compare with snapshot", () => this.toggleSnapshot(), "x"),
+      cmd("Snapshot", "Swap snapshot and knobs", () => this.swapSnapshot(), "X"),
+      cmd("Master", "Auto-master", () => this.autoMaster(), "A", { terms: "plan automatic" }),
+      cmd("Master", "Blind shootout: gentle / balanced / punchy", () => this.startShootout(), "v"),
+      cmd("Master", `Drive for ${TARGETS.integrated} LUFS`, () => this.matchTarget(), "l", { terms: "loudness target limiter" }),
+      cmd("Master", "Apply the top hint", () => this.applyHint(this.currentHints.find((x) => x.knob && x.suggest !== undefined)), "h"),
+      cmd("Master", `Bypass ${MODULE_NAMES[this.nav.module]}`, () => this.engine.toggleBypass(this.nav.module), "b"),
+      cmd("Master", "Reset the selected knob", () => this.setKnob(selected(this.nav), DEFAULTS[selected(this.nav)], null), "0"),
+      cmd("Master", "Undo", () => this.undo(false), "u"),
+      cmd("Master", "Redo", () => this.undo(true), "U"),
+      cmd("Master", "Measure the whole song", () => this.measureMaster(), "m", { terms: "score render" }),
+      cmd("Master", "Restart the meters", () => this.engine.resetMeters(), "z", { terms: "zero" }),
+      cmd("File", "Export WAV 24-bit", () => this.exportWav(24), "e", { terms: "download save" }),
+      cmd("File", "Export WAV 16-bit (dithered)", () => this.exportWav(16), "E", { terms: "download save cd" }),
+      cmd("File", "Save session to a file", () => this.saveSession(), undefined, { terms: "json download" }),
+      cmd("File", "Load a session file (u undoes)", () => this.sessionFile.click(), undefined, { terms: "json open" }),
+      cmd("View", this.explain ? "Hide explanations" : "Show explanations", () => (this.explain = !this.explain), "i", { terms: "help explain" }),
+      cmd("View", "Keyboard shortcuts", () => this.toggleKeys(), "?"),
+      cmd("View", "Desk", () => this.setMode("desk"), undefined, { current: this.mode === "desk" }),
+      cmd("View", "Drills: ear training", () => this.setMode("drills"), "d", { current: this.mode === "drills" }),
+      cmd("View", "Album: master several songs alike", () => this.setMode("album"), undefined, { current: this.mode === "album" }),
+      ...pickers,
+    ];
   }
 
   setMode(mode: Mode): void {
@@ -424,19 +559,15 @@ export class Desk {
   }
 
   async start(initialTrack: string | null, urlSettings: Settings | null, initialReference: string | null = null): Promise<void> {
-    const names = [...this.trackSelect.options].map((o) => o.value);
+    const names = this.tracks;
     const pick = [initialTrack, lastTrack()].find((t): t is string => !!t && names.includes(t)) ?? names[0];
     if (!pick) {
-      this.say("no song library here: drop an audio file anywhere or choose one");
+      this.say("no song library here: drop an audio file anywhere, or press / and open one");
       return;
     }
-    this.trackSelect.value = pick;
     await this.loadTrack(pick, urlSettings);
     const ref = initialReference ?? lastReference();
-    if (ref && names.includes(ref)) {
-      this.refSelect.value = ref;
-      await this.loadReferenceTrack(ref);
-    }
+    if (ref && names.includes(ref)) await this.loadReferenceTrack(ref);
   }
 
   private async loadReferenceTrack(name: string): Promise<void> {
@@ -464,12 +595,6 @@ export class Desk {
 
   protected currentGenre(): GenreKey {
     return this.genreOverride ?? genreFromName(this.track);
-  }
-
-  private syncGenreSelect(): void {
-    const detected = genre(genreFromName(this.track)).label;
-    this.genreSelect.replaceChildren(new Option(`genre: auto (${detected})`, ""), ...GENRES.map((g) => new Option(`genre: ${g.label}`, g.key)));
-    this.genreSelect.value = this.genreOverride ?? "";
   }
 
   private cycleStream(): void {
@@ -541,7 +666,6 @@ export class Desk {
     this.engine.setAll(settings ?? loadSettings(name) ?? defaultSettings());
     this.genreOverride = null;
     this.shoot = null;
-    this.syncGenreSelect();
     this.history.clear();
     this.originalReport = null;
     this.measured = null;
@@ -859,14 +983,9 @@ export class Desk {
   }
 
   private buildPanel(module: Module): HTMLElement {
-    const bypass = button("on", () => this.engine.toggleBypass(module), "b: bypass this module");
-    bypass.onpointerdown = (ev): void => ev.stopPropagation();
-    const title = h("h2", "", MODULE_NAMES[module], bypass);
-    title.onclick = (): void => {
-      this.nav = { ...this.nav, module };
-      this.schedule();
-    };
-    const el = h("section", "panel", title);
+    const bypass = keyButton("on", "b", () => this.engine.toggleBypass(module), "bypass this module");
+    const knobsEl = h("div", "knobs");
+    const el = h("section", "panel module", h("h2", "", MODULE_NAMES[module], bypass), knobsEl);
     for (const key of knobsOf(module)) {
       const bar = new MeterBar(0, 1);
       const value = h("span", "value");
@@ -877,7 +996,7 @@ export class Desk {
       };
       row.ondblclick = (): void => this.setKnob(key, DEFAULTS[key], null);
       this.dragKnob(bar.el, key);
-      el.append(row);
+      knobsEl.append(row);
       this.knobs.set(key, { row, bar, value });
     }
     const view: PanelView = { el, bypass };
@@ -924,6 +1043,12 @@ export class Desk {
 
   protected onKey(ev: KeyboardEvent): void {
     if (ev.target instanceof HTMLSelectElement || ev.target instanceof HTMLInputElement) return;
+    if (this.palette.open || this.keysDialog.open) return;
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "k") {
+      ev.preventDefault();
+      this.openPalette();
+      return;
+    }
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const action = this.keyAction(ev);
     if (!action) return;
@@ -934,6 +1059,8 @@ export class Desk {
 
   protected keyAction(ev: KeyboardEvent): (() => unknown) | null {
     if (ev.key === "d") return () => this.setMode(this.mode === "desk" ? "drills" : "desk");
+    if (ev.key === "/") return () => this.openPalette();
+    if (ev.key === "?") return () => this.toggleKeys();
     if (this.mode === "drills") return this.drills.keyAction(ev);
     if (this.mode === "album") return this.album.keyAction(ev);
     if (this.shoot && !this.shoot.picked) {
@@ -968,7 +1095,6 @@ export class Desk {
       "0": () => this.setKnob(knob, DEFAULTS[knob], null),
       u: () => this.undo(false),
       U: () => this.undo(true),
-      "?": () => (this.explain = !this.explain),
       ",": () => this.engine.seek(s.position - SEEK_SECONDS),
       ".": () => this.engine.seek(s.position + SEEK_SECONDS),
       Home: () => this.engine.seek(0),
@@ -982,11 +1108,13 @@ export class Desk {
       c: () => this.saveSnapshot(),
       x: () => this.toggleSnapshot(),
       X: () => this.swapSnapshot(),
-      s: () => {
-        if (this.soloOn) this.soloOn = false;
-        else if (soloBand(knob, eqBands(s.settings, s.bypass))) this.soloOn = true;
-        else this.say("select an EQ band's knob (or grab its dot) to solo it");
-      },
+      s: () => this.toggleSolo(),
+      t: () => this.openPalette("Song"),
+      R: () => this.openPalette("Reference"),
+      G: () => this.openPalette("Genre"),
+      P: () => this.openPalette("Preset"),
+      i: () => (this.explain = !this.explain),
+      ...Object.fromEntries(MODULES.map((_, i) => [String(i + 1), () => (this.nav = jumpModule(this.nav, i))])),
       h: () => this.applyHint(this.currentHints.find((x) => x.knob && x.suggest !== undefined)),
       e: () => this.exportWav(24),
       E: () => this.exportWav(16),
@@ -1008,15 +1136,24 @@ export class Desk {
     const s = this.state;
     /** Not on the Desk: its panels are hidden and skip their drawing. */
     const drilling = this.mode !== "desk";
-    for (const el of [this.toolbar, this.refRow, this.deskEl, this.spectrum.el, this.lower, this.keysEl]) el.hidden = drilling;
+    for (const el of [this.toolbar, this.deskEl, this.lower, this.helpEl]) el.hidden = drilling;
     this.drills.el.hidden = this.mode !== "drills";
     this.album.el.hidden = this.mode !== "album";
     for (const m of ["desk", "drills", "album"] as const) this.modeButtons[m].className = this.mode === m ? "on" : "";
-    this.trackSelect.hidden = this.mode === "album" || this.trackSelect.options.length === 0;
-    this.fileInput.hidden = this.mode === "album";
+    const crumbValue = (b: HTMLButtonElement, text: string, set: boolean): void => {
+      const value = b.querySelector(".crumb-value");
+      if (value && value.textContent !== text) value.textContent = text;
+      b.classList.toggle("unset", !set);
+    };
+    crumbValue(this.songCrumb, songTitle(this.track) || "none", !!this.track);
+    crumbValue(this.refCrumb, this.reference ? songTitle(this.reference.name) : "none", !!this.reference);
+    crumbValue(this.genreCrumb, genre(this.currentGenre()).label + (this.genreOverride ? "" : " · auto"), !!this.genreOverride);
+    this.songCrumb.hidden = this.mode === "album";
+    // Drills and Album have their own keys (t = next drill), so the crumbs' caps only show on the Desk.
+    this.root.classList.toggle("off-desk", drilling);
     this.messageEl.textContent = this.busy || this.message;
     this.messageEl.className = `message${this.messageIsError ? " error" : ""}`;
-    this.playButton.textContent = s.playing ? "❚❚ pause" : "▶ play";
+    setLabel(this.playButton, s.playing ? "Pause" : "Play");
     this.timeEl.textContent = `${clock(s.position)} / ${clock(s.duration)}`;
     this.progressFill.style.width = `${s.duration > 0 ? (s.position / s.duration) * 100 : 0}%`;
     this.syncReferenceMatch();
@@ -1037,7 +1174,7 @@ export class Desk {
         };
     this.listenEl.textContent = listenLabels[s.listen];
     if (this.platform) this.listenEl.textContent += ` · ON ${platform(this.platform).name.toUpperCase()}${this.streamExact ? "" : " ≈"}`;
-    this.streamButton.textContent = this.platform ? `on ${platform(this.platform).name}` : "streaming";
+    setLabel(this.streamButton, this.platform ? platform(this.platform).name : "Stream");
     this.streamButton.className = this.platform ? "on" : "";
     this.refButton.disabled = !s.hasReference;
     this.refButton.className = s.listen === "reference" ? "on" : "";
@@ -1065,18 +1202,31 @@ export class Desk {
     }
     for (const [module, view] of this.panels) {
       const off = s.bypass[module];
-      view.el.className = `panel${module === this.nav.module ? " active" : ""}${off ? " bypassed" : ""}`;
-      view.bypass.textContent = off ? "bypassed" : "on";
+      const active = module === this.nav.module;
+      view.el.className = `panel module${active ? " active" : ""}${off ? " bypassed" : ""}`;
+      view.el.hidden = !active;
+      setLabel(view.bypass, off ? "bypassed" : "on");
       view.bypass.className = off ? "off" : "on";
+      let worst = 0;
       if (view.gr) {
         const values = BAND_GR_NAMES[view.gr.module] ? (s.reduction.bands[view.gr.module] ?? []) : [s.reduction[view.gr.module]];
         view.gr.rows.forEach((row, i) => {
           const gr = values[i] ?? 0;
+          worst = Math.max(worst, gr);
           row.bar.set(gr, gr > 6 ? "bad" : gr > 3 ? "warn" : "");
           row.value.textContent = `${gr.toFixed(1)} dB`;
         });
         const ring = this.engine.grHistory[view.gr.module];
-        if (!drilling) view.gr.trace?.draw(ring.values(), ring.size);
+        if (!drilling && active) view.gr.trace?.draw(ring.values(), ring.size);
+      }
+      const item = this.rail.get(module);
+      if (item) {
+        const changed = knobsOf(module).some((k) => Math.abs(s.settings[k] - DEFAULTS[k]) > 1e-9);
+        item.className = `rail-item${active ? " active" : ""}${changed ? " changed" : ""}${off ? " off" : ""}`;
+        item.setAttribute("aria-current", String(active));
+        const state = item.querySelector(".rail-state");
+        const text = off ? "off" : worst >= 0.05 ? `−${worst.toFixed(1)}` : "";
+        if (state && state.textContent !== text) state.textContent = text;
       }
     }
 
@@ -1132,6 +1282,12 @@ export class Desk {
       selected: EQ_BAND_KNOBS.findIndex((k) => k.freq === current || k.gain === current || k.q === current),
       solo: this.soloOn ? soloBand(current, bands) : null,
     });
+  }
+
+  private toggleSolo(): void {
+    if (this.soloOn) this.soloOn = false;
+    else if (soloBand(selected(this.nav), eqBands(this.state.settings, this.state.bypass))) this.soloOn = true;
+    else this.say("select an EQ band's knob (or grab its dot) to solo it");
   }
 
   /** Solo follows the selected band (and its frequency as you move it); a non-band knob ends it. */
@@ -1190,7 +1346,7 @@ export class Desk {
 
   private renderHints(): void {
     const o = this.originalReport;
-    const title = h("h2", "", "Hints", h("span", "kbd", "h: apply top"));
+    const title = h("h2", "", "Hints", headKey("h", "apply top"));
     if (!o) {
       this.currentHints = [];
       this.hintsSignature = "";
@@ -1211,19 +1367,19 @@ export class Desk {
       }
     }
     this.hintsSignature = signature;
+    const top = this.currentHints.find((x) => x.knob && x.suggest !== undefined);
     const items = this.currentHints.map((hint) => {
       const li = h("li", hint.level, hint.text);
       if (hint.knob) {
         const label = hint.suggest !== undefined ? `apply ${signed(hint.suggest)}` : "go to knob";
-        const b = button(label, () => this.applyHint(hint), hint.suggest !== undefined ? `set ${SPECS.get(hint.knob)?.label} ${signed(hint.suggest)}` : "");
-        b.style.marginLeft = "6px";
-        li.append(b);
+        const title = hint.suggest !== undefined ? `set ${SPECS.get(hint.knob)?.label} ${signed(hint.suggest)}` : "";
+        li.append(hint === top ? keyButton(label, "h", () => this.applyHint(hint), title) : button(label, () => this.applyHint(hint), title));
       }
       return li;
     });
     const refNote = this.reference
       ? h("p", "dim", this.reference.report ? `comparing tone with ${this.reference.name}` : "measuring the reference…")
-      : h("p", "dim", "pick a reference above to compare tonal balance");
+      : h("p", "dim", "press R to pick a reference and compare tonal balance");
     this.hintsEl.replaceChildren(title, ...(this.autoEl ? [this.autoEl] : []), h("ul", "", ...items), refNote);
   }
 
@@ -1245,12 +1401,12 @@ export class Desk {
     if (signature === this.explainSignature) return;
     this.explainSignature = signature;
     if (!this.explain) {
-      this.explainEl.replaceChildren(h("p", "dim", "? shows explanations"));
+      this.explainEl.replaceChildren(h("p", "dim", "press i for explanations"));
       return;
     }
     this.meterHelp ??= h("details", "", h("summary", "dim", "About the meters"), ...Object.values(METER_HELP).map((t) => h("p", "dim", t)));
     this.explainEl.replaceChildren(
-      h("h2", "", `${SPECS.get(current)?.label ?? current}`, h("span", "kbd", "?: hide")),
+      h("h2", "", `${SPECS.get(current)?.label ?? current}`, headKey("i", "hide")),
       h("p", "", PARAM_HELP[current]),
       h("p", "dim", MODULE_HELP[this.nav.module]),
       this.meterHelp,
@@ -1277,7 +1433,7 @@ export class Desk {
     const o = this.originalReport;
     const mm = this.measured;
     const stale = mm && mm.key !== this.currentKey();
-    const title = h("h2", "", "Full-song check", h("span", "kbd", "m: measure"));
+    const title = h("h2", "", "Full-song check", headKey("m", "measure"));
     if (!o) {
       this.scoreEl.replaceChildren(title, h("p", "dim", this.engine.loaded ? "measuring the original…" : "load a song"));
       return;
@@ -1327,7 +1483,7 @@ export class Desk {
     } else {
       children.push(h("p", "dim", this.busy || "press m to render the whole song with these settings and score it"));
     }
-    children.push(h("h3", "", "Loudness over the song", h("span", "dim", " · blue original · amber master · click to seek")), this.plot.el, table);
+    children.push(h("h3", "", "Loudness over the song", h("span", "dim", " · blue original · lilac master · click to seek")), this.plot.el, table);
     children.push(...this.streamingTable(o, r && !stale ? r : null, ref ?? null));
     this.scoreEl.replaceChildren(...children);
     this.plot.update(o, r && !stale ? r : null, ref ?? null, this.state.position);

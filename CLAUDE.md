@@ -77,7 +77,7 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
 
 1. ✅ Scaffold + DOM-free analysis math
 2. ✅ Audio engine: load mp3, play, EQ/comp/limiter chain (AudioWorklet lookahead limiter), A/B, bypass
-3. ✅ Desk UI: meters, targets, keyboard knobs, `a` A/B, `b` bypass selected module, `?` explain, score
+3. ✅ Desk UI: meters, targets, keyboard knobs, `a` A/B, `b` bypass selected module, `i` explain, score
 4. ✅ WAV export (24-bit / 16-bit TPDF), verified with ffmpeg
 5. ✅ Drills (EQ, compression, limiting, stereo width; 5 levels each, streaks)
 6. ✅ Hints + reference-track comparison
@@ -92,7 +92,7 @@ GR history traces (`src/master/ring.ts`, `gr-trace.ts`), presets (`src/master/pr
 draggable EQ dots (`src/desk/eq-drag.ts`), self-ticking checklist (`src/master/checklist.ts`), band solo (`s`,
 a bandpass on the engine's monitor path; meters and analysers tap before it, so soloing never changes readings),
 snapshot compare (`c` save / `x` hear / `X` swap: a second `buildChain` fed by the same source, matched to the master's
-short-term loudness like the original; `just render ... --live` checks it), session JSON files (header `session ▾`),
+short-term loudness like the original; `just render ... --live` checks it), session JSON files (palette: Save session / Load a session file),
 multiband module (`multi`, between EQ and Compressor; modules are `MODULES` in signal order, so Tab goes EQ → Multiband →
 Compressor → Limiter; build bypass objects with `noBypass()`), auto-master (`A` / `just automaster`; the no-reference
 tonal target is `tiltedShares(ANALYSER_TILT_DB_PER_OCT)` in `spectrum.ts`; tests check its plans trip no hint warning),
@@ -111,9 +111,16 @@ limiter, edges. `Report.resonances` (`src/analysis/resonance.ts`): hints/auto-ma
 (`TAME_RULES`; lower peaks are mostly the song's notes). Color's clip threshold is relative to the limiter's
 (ceiling − Drive + "Clip above"). Genre profiles feed auto-master; the blind shootout (`v`) stores pick counts
 (`loadTaste`) and `tasteLean` blends later plans toward gentle/punchy. Tests check every genre × case × style plan
-trips no hint warning. Album tab + `just album`. Style: warm graphite + one amber accent, IBM Plex (self-hosted
-woff2 in `src/desk/fonts/`, OFL); colors and the 4 px spacing scale are tokens in `desk.css`, chart series are
-`--series-*` (canvases read them), so never hard-code a hex in TS.
+trips no hint warning. Album tab + `just album`. Style: idiom's (`../idiom`) Dusk theme, dark scheme: plum surfaces,
+one lilac accent (`--accent` fills, `--accent-ink` for accent text and focus); DM Sans / DM Mono / Instrument Serif
+(wordmark, module names), self-hosted woff2 + OFL in `src/desk/fonts/`; colors and the 4 px spacing scale are tokens in
+`desk.css`, chart series are `--series-*` (canvases read them), so never hard-code a hex in TS.
+Keyboard-first layout: top bar (mode tabs, Song/Ref/Genre crumbs that open the palette, Commands, `?`), transport
+(every button is a `keyButton` showing its key; relabel with `setLabel` so the cap survives), then rail | stage | side:
+the rail (`1`–`7`, Tab) shows one module open at a time and each module's changed/bypassed/GR state; the stage holds that
+module, the knob's explanation (`i`) and the spectrum; the side holds meters, hints, checklist. `palette.ts` = command
+palette (`/`, Ctrl+K; `t R G P` open it on one group; ranking in `search.ts`, ported from idiom); new actions go in
+`Desk.commands()` and, if they have a key, in `KEY_GROUPS` (the `?` overlay).
 `window.__engine` is exposed for probes: tap private nodes (e.g. `stereoOut`) with an AnalyserNode and compare
 output/input spectra at the same time (music changes too fast for before/after readings).
 

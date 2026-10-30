@@ -17,6 +17,21 @@ export function button(label: string, onClick: () => void, title = ""): HTMLButt
   return b;
 }
 
+/** A button that shows its shortcut, so the key is learned by using the mouse once. */
+export function keyButton(label: string, key: string, onClick: () => void, title = ""): HTMLButtonElement {
+  const b = h("button", "", h("span", "", label), h("kbd", "", key));
+  b.type = "button";
+  b.title = title ? `${title} (${key})` : key;
+  b.onclick = onClick;
+  return b;
+}
+
+/** Relabels a `keyButton` without touching its key cap (and without a DOM write when nothing changed). */
+export function setLabel(b: HTMLButtonElement, label: string): void {
+  const span = b.firstElementChild;
+  if (span && span.textContent !== label) span.textContent = label;
+}
+
 /** Saves `blob` through the browser's download (same path a click on a link takes). */
 export function download(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob);

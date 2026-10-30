@@ -34,6 +34,12 @@ export function moveModule(nav: Nav, delta: number): Nav {
   return { ...nav, module: MODULES[wrap(MODULES.indexOf(nav.module) + delta, MODULES.length)] };
 }
 
+/** Number keys: module by position in signal order; out of range leaves the selection alone. */
+export function jumpModule(nav: Nav, index: number): Nav {
+  const module = MODULES[index];
+  return module ? { ...nav, module } : nav;
+}
+
 export function selectKnob(nav: Nav, key: ParamKey): Nav {
   const module = MODULES.find((m) => knobsOf(m).includes(key));
   if (!module) throw new RangeError(`unknown knob ${key}`);
