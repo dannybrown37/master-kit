@@ -109,9 +109,9 @@ async function deskMode(): Promise<void> {
 function report(err: unknown): void {
   console.error(err);
   $("app").textContent = `error: ${err instanceof Error ? err.message : String(err)}`;
-  document.title = "error";
+  document.documentElement.dataset.status = "error";
 }
 
 (params.has("render") ? renderMode() : params.has("auto") ? autoMode() : deskMode()).then(() => {
-  document.title = "ready";
+  document.documentElement.dataset.status = "ready";
 }, report);

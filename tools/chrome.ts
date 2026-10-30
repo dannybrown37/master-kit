@@ -69,13 +69,13 @@ export class Cdp {
     await this.send("Input.dispatchKeyEvent", { type: "keyUp", key });
   }
 
-  /** Waits for the page to set document.title to "ready" (or "error"). */
+  /** Waits for the page to set `<html data-status>` to "ready" (or "error"). */
   async waitReady(timeoutSeconds: number): Promise<void> {
     const deadline = Date.now() + timeoutSeconds * 1000;
     while (Date.now() < deadline) {
-      const title = await this.evaluate<string>("document.title");
-      if (title === "ready") return;
-      if (title === "error") throw new Error(`page reported an error\n${this.logs.join("\n")}`);
+      const status = await this.evaluate<string>("document.documentElement.dataset.status ?? ''");
+      if (status === "ready") return;
+      if (status === "error") throw new Error(`page reported an error\n${this.logs.join("\n")}`);
       await sleep(250);
     }
     throw new Error(`page not ready after ${timeoutSeconds} s\n${this.logs.join("\n")}`);
