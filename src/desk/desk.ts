@@ -35,6 +35,8 @@ import { encodeWav } from "../export/wav.ts";
 import type { BitDepth } from "../export/wav.ts";
 import { AlbumView } from "../album/view.ts";
 import { DrillView } from "../drills/view.ts";
+import { trackUrl } from "../audio/tracks.ts";
+import { pickAudioFile } from "../master/library.ts";
 import { MeterBar, button, clock, db, download, h, signed } from "./dom.ts";
 import { GrTrace } from "./gr-trace.ts";
 import { LoudnessPlot } from "./loudness-plot.ts";
@@ -216,8 +218,14 @@ export class Desk {
     this.fileInput.accept = "audio/*";
     this.fileInput.onchange = (): void => {
       const file = this.fileInput.files?.[0];
-      if (file) this.run(file.arrayBuffer().then((data) => this.loadData(file.name, data)));
+      if (file) this.loadFile(file);
     };
+    document.addEventListener("dragover", (e) => e.preventDefault());
+    document.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const file = pickAudioFile([...(e.dataTransfer?.files ?? [])]);
+      if (file && this.mode !== "album") this.loadFile(file);
+    });
     this.messageEl = h("span", "message");
 
     this.playButton = button("▶ play", () => this.run(this.engine.toggle()), "space");
@@ -419,7 +427,7 @@ export class Desk {
     const names = [...this.trackSelect.options].map((o) => o.value);
     const pick = [initialTrack, lastTrack()].find((t): t is string => !!t && names.includes(t)) ?? names[0];
     if (!pick) {
-      this.say("no songs in MUSIC_DIR: pick a file");
+      this.say("no song library here: drop an audio file anywhere or choose one");
       return;
     }
     this.trackSelect.value = pick;
@@ -439,7 +447,7 @@ export class Desk {
       this.schedule();
       return;
     }
-    const res = await fetch(`/tracks/${encodeURIComponent(name)}`);
+    const res = await fetch(trackUrl(name));
     if (!res.ok) throw new Error(`could not load reference "${name}" (${res.status})`);
     await this.loadReference(name, await res.arrayBuffer());
   }
@@ -514,8 +522,12 @@ export class Desk {
     this.schedule();
   }
 
+  private loadFile(file: File): void {
+    this.run(file.arrayBuffer().then((data) => this.loadData(file.name, data)));
+  }
+
   private async loadTrack(name: string, settings: Settings | null = null): Promise<void> {
-    const res = await fetch(`/tracks/${encodeURIComponent(name)}`);
+    const res = await fetch(trackUrl(name));
     if (!res.ok) throw new Error(`could not load "${name}" (${res.status})`);
     await this.loadData(name, await res.arrayBuffer(), settings);
   }
@@ -1000,7 +1012,7 @@ export class Desk {
     this.drills.el.hidden = this.mode !== "drills";
     this.album.el.hidden = this.mode !== "album";
     for (const m of ["desk", "drills", "album"] as const) this.modeButtons[m].className = this.mode === m ? "on" : "";
-    this.trackSelect.hidden = this.mode === "album";
+    this.trackSelect.hidden = this.mode === "album" || this.trackSelect.options.length === 0;
     this.fileInput.hidden = this.mode === "album";
     this.messageEl.textContent = this.busy || this.message;
     this.messageEl.className = `message${this.messageIsError ? " error" : ""}`;

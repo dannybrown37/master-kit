@@ -9,6 +9,7 @@ import { Engine } from "./audio/engine.ts";
 import { measure } from "./audio/measure.ts";
 import { decodeAt, decodeNative, renderMaster } from "./audio/render.ts";
 import { fetchTrack } from "./audio/tracks.ts";
+import { parseTrackList } from "./master/library.ts";
 import { Desk, channelsOf } from "./desk/desk.ts";
 import "./desk/desk.css";
 import type { Rendered } from "./audio/render.ts";
@@ -97,8 +98,8 @@ async function autoMode(): Promise<void> {
 async function deskMode(): Promise<void> {
   const engine = await Engine.create();
   window.__engine = engine;
-  const res = await fetch("/api/tracks");
-  const { tracks } = res.ok ? ((await res.json()) as { tracks: string[] }) : { tracks: [] };
+  const res = await fetch(`${import.meta.env.BASE_URL}api/tracks`).catch(() => null);
+  const tracks = res?.ok ? parseTrackList(res.headers.get("Content-Type"), await res.text()) : [];
   const desk = new Desk($("app"), engine, tracks);
   await desk.start(params.get("track"), params.has("set") ? settingsFromUrl() : null, params.get("ref"));
   if (params.has("drills")) desk.setMode("drills");

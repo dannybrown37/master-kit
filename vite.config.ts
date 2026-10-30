@@ -44,6 +44,7 @@ function musicLibrary(dir: string): Plugin {
 }
 
 export default defineConfig({
+  base: process.env.BASE_PATH ?? "/",
   plugins: [musicLibrary(process.env.MUSIC_DIR ?? "../deluge-quest/web/public/audio")],
   server: { port: 5174, strictPort: true },
   worker: { format: "es" },
