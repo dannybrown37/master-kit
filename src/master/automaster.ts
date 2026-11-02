@@ -20,6 +20,8 @@ export interface PlanInput {
   genre?: GenreKey;
   /** Shootout taste, -1 (gentle) … +1 (punchy); see `tasteLean`. */
   taste?: number;
+  /** A video's sound: no lead-in or tail, which would shift it off the picture. */
+  video?: boolean;
 }
 
 export interface Plan {
@@ -74,7 +76,7 @@ export function planMaster(input: PlanInput): Plan {
   };
 }
 
-function basePlan({ original: o, reference: ref = null, genre: genreKey = "generic" }: PlanInput): Plan {
+function basePlan({ original: o, reference: ref = null, genre: genreKey = "generic", video = false }: PlanInput): Plan {
   const s = defaultSettings();
   const bypass = noBypass();
   const steps: string[] = [];
@@ -188,7 +190,7 @@ function basePlan({ original: o, reference: ref = null, genre: genreKey = "gener
   set("limCeiling", TARGETS.truePeakMax);
   set("limDrive", TARGETS.integrated - o.integrated);
   steps.push(`Limiter: ceiling ${formatParam("limCeiling", s.limCeiling)} (safe for mp3/AAC encoding).`);
-  steps.push(...planEdges(o, set));
+  steps.push(...planEdges(o, set, video));
   return { settings: s, bypass, steps };
 }
 
@@ -219,20 +221,22 @@ function planTamer(o: Report, set: (key: ParamKey, value: number) => number): st
   return steps;
 }
 
-function planEdges(o: Report, set: (key: ParamKey, value: number) => number): string[] {
+function planEdges(o: Report, set: (key: ParamKey, value: number) => number, video: boolean): string[] {
   const r = EDGE_RULES;
   const hard = hardEdges(o);
   const steps: string[] = [];
   if (hard.start) {
-    if (o.edges.leadSeconds < r.minLeadSeconds) set("edgeLeadMs", r.leadMs);
+    const lead = !video && o.edges.leadSeconds < r.minLeadSeconds;
+    if (lead) set("edgeLeadMs", r.leadMs);
     set("edgeFadeInMs", r.fadeInMs);
-    steps.push(`Edges: the song hits ${f1(o.edges.startDb)} dBFS right away → ${r.fadeInMs} ms fade-in (no click)${o.edges.leadSeconds < r.minLeadSeconds ? ` and ${r.leadMs} ms of silence first, so a player waking up can't swallow the first hit` : ""}.`);
+    steps.push(`Edges: the song hits ${f1(o.edges.startDb)} dBFS right away → ${r.fadeInMs} ms fade-in (no click)${lead ? ` and ${r.leadMs} ms of silence first, so a player waking up can't swallow the first hit` : ""}.`);
   }
   if (hard.end) {
     set("edgeFadeOutMs", r.fadeOutMs);
     steps.push(`Edges: it stops on a hard cut (${f1(o.edges.endDb)} dBFS) → ${r.fadeOutMs} ms fade-out, so the ending stays abrupt but doesn't click. For a fade to silence, set Fade-out to a few seconds.`);
   }
-  if (o.edges.tailSeconds < r.minTailSeconds) {
+  if (video) steps.push("Edges: video, so no lead-in or tail: the audio keeps its exact length and stays in sync with the picture.");
+  else if (o.edges.tailSeconds < r.minTailSeconds) {
     set("edgeTailMs", r.tailMs);
     steps.push(`Edges: ${formatParam("edgeTailMs", r.tailMs)} of silence after the last sound, so the next track doesn't crash in.`);
   }

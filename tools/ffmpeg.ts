@@ -7,7 +7,7 @@ export interface Decoded {
   sampleRate: number;
 }
 
-function run(cmd: string, args: string[], input?: Buffer): { stdout: Buffer; stderr: string } {
+export function run(cmd: string, args: string[], input?: Buffer): { stdout: Buffer; stderr: string } {
   const res = spawnSync(cmd, args, { input, maxBuffer: 2 ** 31 });
   if (res.error) throw new Error(`${cmd} not runnable: ${res.error.message}`);
   if (res.status !== 0) throw new Error(`${cmd} failed: ${res.stderr.toString().trim()}`);

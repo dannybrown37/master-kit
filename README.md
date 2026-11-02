@@ -2,6 +2,8 @@
 
 A browser app for learning audio **mastering** on your own finished songs (mp3s), plus ear-training drills.
 Mastering only: no stems, so no mixing.
+Videos work too (mp4, mov, webm, mkv): the app masters their audio track with Lead-in and Tail locked at 0, so the
+sound keeps its exact length, and `just remux <video> <master.wav>` puts it back under the picture after checking sync.
 
 Status: **all 6 steps built**: analysis core, audio engine, Desk UI, WAV export, drills, hints + reference comparison;
 since then a live spectrum with a draggable EQ, band solo, GR history, presets, one-key loudness matching (`l`),

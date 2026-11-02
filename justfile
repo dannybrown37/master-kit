@@ -43,6 +43,10 @@ crosscheck *files:
 export *args:
     @node tools/export.ts "$@"
 
+# Put a mastered WAV back under its video, checking sync before and after: just remux <video> <master.wav> [--out FILE]
+remux *args:
+    @node tools/remux.ts "$@"
+
 # Screenshot the Desk at desktop and mobile width: just shot [track] [--play S] [--keys K1,K2] [--name NAME]
 shot *args:
     @node tools/shot.ts "$@"

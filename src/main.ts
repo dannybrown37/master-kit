@@ -16,6 +16,7 @@ import type { Rendered } from "./audio/render.ts";
 import { genreFromName, parseGenre } from "./master/genres.ts";
 import { MODULES, parseSettings } from "./master/settings.ts";
 import type { Bypass, Module, Settings } from "./master/settings.ts";
+import { isVideoName } from "./master/video.ts";
 
 /** What tools/automaster.ts reads back from the page. */
 export interface AutoResult {
@@ -86,7 +87,7 @@ async function autoMode(): Promise<void> {
   const reference = refBuffer ? await measure(channelsOf(refBuffer), refBuffer.sampleRate) : null;
   const t0 = performance.now();
   const genre = parseGenre(params.get("genre")) ?? genreFromName(track);
-  const auto = await autoMaster(buffer, original, { reference, genre }, (text) => console.log(text));
+  const auto = await autoMaster(buffer, original, { reference, genre, video: isVideoName(track) }, (text) => console.log(text));
   if (!auto) throw new Error("auto-master stopped before it finished");
   console.log(`auto-master took ${((performance.now() - t0) / 1000).toFixed(1)} s`);
   const { settings, bypass, steps, report, audio } = auto;

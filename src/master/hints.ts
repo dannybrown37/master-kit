@@ -22,6 +22,8 @@ export interface HintInput {
   settings: Settings;
   bypass: Bypass;
   reference?: Report | null;
+  /** A video's sound: Lead-in and Tail are locked at 0, so never suggest them. */
+  video?: boolean;
 }
 
 const ORDER: Record<HintLevel, number> = { bad: 0, warn: 1, info: 2, good: 3 };
@@ -179,14 +181,14 @@ export function hardEdges(o: Report): { start: boolean; end: boolean } {
 }
 
 /** From the original's edges: the limiter doesn't change where the sound starts or stops. */
-function edgeHints(o: Report, s: Settings, bypass: Bypass): Hint[] {
+function edgeHints(o: Report, s: Settings, bypass: Bypass, video: boolean): Hint[] {
   const p = edgeParams(s, bypass);
   const e = o.edges;
   const r = EDGE_RULES;
   const hard = hardEdges(o);
   const ms = (x: number): string => `${Math.round(x * 1000)} ms`;
   const out: Hint[] = [];
-  if (hard.start && Math.max(e.leadSeconds, p.lead) < r.minLeadSeconds) {
+  if (!video && hard.start && Math.max(e.leadSeconds, p.lead) < r.minLeadSeconds) {
     out.push({
       level: "warn",
       text: `The song hits ${f1(e.startDb)} dBFS ${ms(e.leadSeconds)} in: players and Bluetooth speakers that take a moment to start swallow that first hit. Set Lead-in to ~${r.leadMs} ms (Edges).`,
@@ -205,7 +207,7 @@ function edgeHints(o: Report, s: Settings, bypass: Bypass): Hint[] {
       suggest: r.fadeOutMs - s.edgeFadeOutMs,
     });
   }
-  if (Math.max(e.tailSeconds, p.tail) < r.minTailSeconds) {
+  if (!video && Math.max(e.tailSeconds, p.tail) < r.minTailSeconds) {
     out.push({ level: "info", text: `Only ${ms(e.tailSeconds)} of silence after the last sound: leave ~1 s so the next track or an ad doesn't crash in. Set Tail.`, knob: "edgeTailMs", suggest: r.tailMs - s.edgeTailMs });
   }
   return out;
@@ -330,7 +332,7 @@ function referenceHints(m: Report, ref: Report, s: Settings): Hint[] {
 
 export function hints(input: HintInput): Hint[] {
   const { original, master, settings, bypass, reference } = input;
-  const out: Hint[] = [...settingHints(original, settings, bypass), ...edgeHints(original, settings, bypass), ...tameHints(original, settings, bypass)];
+  const out: Hint[] = [...settingHints(original, settings, bypass), ...edgeHints(original, settings, bypass, input.video ?? false),...tameHints(original, settings, bypass)];
   if (!master) {
     out.push({ level: "info", text: "Press m to measure the whole song; hints about loudness, peaks and tone need a full-song measurement." });
   } else {

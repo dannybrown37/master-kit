@@ -20,6 +20,8 @@ describe("pickAudioFile", () => {
     ["audio mime", [{ name: "x", type: "audio/mpeg" }], "x"],
     ["extension when type empty", [{ name: "Song.FLAC", type: "" }], "Song.FLAC"],
     ["skips non-audio", [{ name: "notes.txt", type: "text/plain" }, { name: "s.mp3", type: "" }], "s.mp3"],
+    ["video mime", [{ name: "v", type: "video/mp4" }], "v"],
+    ["video extension when type empty", [{ name: "Take 2.MOV", type: "" }], "Take 2.MOV"],
     ["none", [{ name: "pic.png", type: "image/png" }], null],
     ["empty", [], null],
   ])("%s", (_name, files, want) => {

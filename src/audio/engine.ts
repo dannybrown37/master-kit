@@ -7,6 +7,7 @@ import type { Bounds } from "../dsp/edges.ts";
 import { EDGE_KEYS, clampParam, defaultSettings, edgeParams, noBypass } from "../master/settings.ts";
 import type { Bypass, Module, ParamKey, Settings } from "../master/settings.ts";
 import type { Snapshot } from "../master/snapshot.ts";
+import { lockSync } from "../master/video.ts";
 import { buildChain, loadWorklets } from "./chain.ts";
 import type { Chain } from "./chain.ts";
 import { REPORT_SECONDS } from "./messages.ts";
@@ -99,6 +100,8 @@ export class Engine {
   private transport = new Transport(0);
   private settings: Settings = defaultSettings();
   private bypass: Bypass = noBypass();
+  /** Video sound: every settings change goes through `lockSync`, so no path can add a lead-in or tail. */
+  private video = false;
   private listen: Listen = "master";
   private readings: Record<Listen, MeterReading> = { original: SILENT, master: SILENT, reference: SILENT, snapshot: SILENT };
   private reduction: Reduction = { tame: 0, multi: 0, comp: 0, color: 0, limiter: 0, bands: {} };
@@ -372,8 +375,14 @@ export class Engine {
     else this.onChange(this.state);
   }
 
+  setVideo(video: boolean): void {
+    this.video = video;
+    this.setAll(this.settings);
+  }
+
   set(key: ParamKey, value: number): number {
     this.settings[key] = clampParam(key, value);
+    if (this.video) this.settings = lockSync(this.settings);
     this.chain.apply(this.settings, this.bypass);
     if ((EDGE_KEYS as readonly string[]).includes(key)) this.scheduleEdges();
     this.onChange(this.state);
@@ -381,7 +390,7 @@ export class Engine {
   }
 
   setAll(settings: Settings): void {
-    this.settings = { ...settings };
+    this.settings = this.video ? lockSync(settings) : { ...settings };
     this.chain.apply(this.settings, this.bypass);
     this.scheduleEdges();
     this.onChange(this.state);

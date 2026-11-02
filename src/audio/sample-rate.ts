@@ -1,5 +1,5 @@
 /**
- * Reads a song file's own sample rate from its header (mp3, WAV, FLAC), so the offline render and
+ * Reads a song file's own sample rate from its header (mp3, WAV, FLAC, MP4/MOV/M4A, MKV/WebM), so the offline render and
  * export can run at it instead of the AudioContext's rate (often 48 kHz for a 44.1 kHz mp3).
  * Returns null for formats it doesn't know or headers that don't make sense.
  */
@@ -54,11 +54,112 @@ function mp3Rate(b: Uint8Array): number | null {
   return null;
 }
 
+interface Span {
+  id: number | string;
+  start: number;
+  end: number;
+}
+
+function* isoBoxes(v: DataView, b: Uint8Array, start: number, end: number): Generator<Span> {
+  for (let at = start; at + 8 <= end; ) {
+    let size = v.getUint32(at);
+    let header = 8;
+    if (size === 1) {
+      if (at + 16 > end) return;
+      size = v.getUint32(at + 8) * 2 ** 32 + v.getUint32(at + 12);
+      header = 16;
+    } else if (size === 0) size = end - at;
+    if (size < header || at + size > end) return;
+    yield { id: String.fromCharCode(b[at + 4], b[at + 5], b[at + 6], b[at + 7]), start: at + header, end: at + size };
+    at += size;
+  }
+}
+
+const child = (v: DataView, b: Uint8Array, parent: Span | undefined, type: string): Span | undefined =>
+  parent && [...isoBoxes(v, b, parent.start, parent.end)].find((s) => s.id === type);
+
+/** MP4/MOV/M4A: the first sound track's sample entry (QuickTime v2 entries keep the rate as a float64). */
+function isoRate(v: DataView, b: Uint8Array): number | null {
+  const moov = child(v, b, { id: "", start: 0, end: b.length }, "moov");
+  for (const trak of moov ? isoBoxes(v, b, moov.start, moov.end) : []) {
+    if (trak.id !== "trak") continue;
+    const mdia = child(v, b, trak, "mdia");
+    const hdlr = child(v, b, mdia, "hdlr");
+    if (!hdlr || hdlr.start + 12 > hdlr.end || !ascii(b, hdlr.start + 8, "soun")) continue;
+    const stsd = child(v, b, child(v, b, child(v, b, mdia, "minf"), "stbl"), "stsd");
+    const entry = stsd && [...isoBoxes(v, b, stsd.start + 8, stsd.end)][0];
+    if (!entry || entry.start + 28 > entry.end) return null;
+    if (v.getUint16(entry.start + 8) === 2) return entry.start + 40 <= entry.end ? plausible(Math.round(v.getFloat64(entry.start + 32))) : null;
+    return plausible(v.getUint16(entry.start + 24));
+  }
+  return null;
+}
+
+const EBML = { segment: 0x18538067, tracks: 0x1654ae6b, trackEntry: 0xae, audio: 0xe1, rate: 0xb5, outputRate: 0x78b5 };
+
+function vintLength(first: number): number {
+  for (let len = 1; len <= 8; len++) if (first & (0x100 >> len)) return len;
+  return 0;
+}
+
+function* ebmlElements(b: Uint8Array, start: number, end: number): Generator<Span> {
+  for (let at = start; at < end; ) {
+    const idLen = vintLength(b[at]);
+    if (!idLen || at + idLen >= end) return;
+    let id = 0;
+    for (let i = 0; i < idLen; i++) id = id * 256 + b[at + i];
+    const sizeAt = at + idLen;
+    const sizeLen = vintLength(b[sizeAt]);
+    if (!sizeLen || sizeAt + sizeLen > end) return;
+    let size = b[sizeAt] & (0xff >> sizeLen);
+    let unknown = size === 0xff >> sizeLen;
+    for (let i = 1; i < sizeLen; i++) {
+      size = size * 256 + b[sizeAt + i];
+      unknown &&= b[sizeAt + i] === 0xff;
+    }
+    const data = sizeAt + sizeLen;
+    const stop = unknown ? end : data + size;
+    if (stop > end) return;
+    yield { id, start: data, end: stop };
+    at = stop;
+  }
+}
+
+function ebmlFloat(v: DataView, s: Span): number | null {
+  if (s.end - s.start === 4) return v.getFloat32(s.start);
+  if (s.end - s.start === 8) return v.getFloat64(s.start);
+  return null;
+}
+
+/** Matroska/WebM: the first audio track's (output) sampling frequency. */
+function matroskaRate(v: DataView, b: Uint8Array): number | null {
+  const within = (parent: Span, id: number): Span[] => [...ebmlElements(b, parent.start, parent.end)].filter((s) => s.id === id);
+  for (const segment of within({ id: 0, start: 0, end: b.length }, EBML.segment)) {
+    // A live WebM Segment has no size, so stop walking it at Tracks rather than scanning every Cluster.
+    for (const tracks of ebmlElements(b, segment.start, segment.end)) {
+      if (tracks.id !== EBML.tracks) continue;
+      for (const entry of within(tracks, EBML.trackEntry)) {
+        const audio = within(entry, EBML.audio)[0];
+        if (!audio) continue;
+        const rates = within(audio, EBML.outputRate).concat(within(audio, EBML.rate));
+        const rate = rates.length ? ebmlFloat(v, rates[0]) : null;
+        return rate === null ? null : plausible(Math.round(rate));
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+const ISO_TOP_BOXES = ["ftyp", "moov", "mdat", "wide", "free", "skip"];
+
 export function fileSampleRate(data: ArrayBuffer): number | null {
   const b = new Uint8Array(data);
   const v = new DataView(data);
   if (ascii(b, 0, "RIFF") && ascii(b, 8, "WAVE")) return wavRate(v, b);
   if (ascii(b, 0, "fLaC")) return flacRate(b);
   if (ascii(b, 0, "OggS")) return null;
+  if (ISO_TOP_BOXES.some((type) => ascii(b, 4, type))) return isoRate(v, b);
+  if (b.length >= 4 && v.getUint32(0) === 0x1a45dfa3) return matroskaRate(v, b);
   return mp3Rate(b);
 }

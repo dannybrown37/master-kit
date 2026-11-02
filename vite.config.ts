@@ -11,6 +11,10 @@ const MIME: Record<string, string> = {
   ".m4a": "audio/mp4",
   ".aac": "audio/aac",
   ".opus": "audio/ogg",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
 };
 
 /** Dev-only: lists and serves audio from MUSIC_DIR so the app has a library to pick from. */

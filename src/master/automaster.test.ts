@@ -6,7 +6,7 @@ import { GENRES } from "./genres.ts";
 import { applyTaste } from "./shootout.ts";
 import type { GenreKey } from "./genres.ts";
 import { hints } from "./hints.ts";
-import { defaultSettings, parseSettings } from "./settings.ts";
+import { defaultSettings, noBypass, parseSettings } from "./settings.ts";
 import { report } from "./test-report.ts";
 
 const BALANCED = tiltedShares(ANALYSER_TILT_DB_PER_OCT);
@@ -87,6 +87,14 @@ describe("planMaster", () => {
     const { settings: s, steps } = planMaster({ original: report({ edges }, tilted()) });
     expect([s.edgeLeadMs, s.edgeFadeInMs, s.edgeFadeOutMs, s.edgeTailMs]).toEqual(want);
     expect(steps.some((x) => x.startsWith("Edges:"))).toBe(want.some((v) => v > 0));
+  });
+
+  it("video: declick fades only, never a lead-in or tail (they would shift the audio off the picture)", () => {
+    const original = report({ edges: { leadSeconds: 0, tailSeconds: 0, startDb: -1, endDb: -2 } }, tilted());
+    const { settings: s, steps } = planMaster({ original, video: true });
+    expect([s.edgeLeadMs, s.edgeFadeInMs, s.edgeFadeOutMs, s.edgeTailMs]).toEqual([0, 5, 100, 0]);
+    expect(steps.join("\n")).not.toMatch(/silence first|silence after/);
+    expect(hints({ original, master: null, settings: s, bypass: noBypass(), video: true }).filter((h) => h.level !== "good" && h.knob?.startsWith("edge"))).toEqual([]);
   });
 
   const EVERY: [string, Report, Report | null, GenreKey][] = CASES.flatMap(([name, o, ref]) => GENRES.map((g): [string, Report, Report | null, GenreKey] => [`${name} as ${g.key}`, o, ref, g.key]));

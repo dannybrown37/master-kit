@@ -229,6 +229,11 @@ describe("hints", () => {
       expect(edgeHints(edges, over).map((h) => h.knob)).toEqual(knobs);
     });
 
+    it("video: never suggests a lead-in or tail, still suggests the declick fades", () => {
+      const list = hints(input({ original: report({ edges: HARD }), master: null, video: true })).filter((h) => h.knob?.startsWith("edge"));
+      expect(list.map((h) => h.knob)).toEqual(["edgeFadeOutMs", "edgeFadeInMs"]);
+    });
+
     it("bypassing Edges brings the hints back", () => {
       const fixed = { edgeLeadMs: 200, edgeFadeInMs: 5, edgeFadeOutMs: 100, edgeTailMs: 1000 };
       expect(edgeHints(HARD, fixed)).toEqual([]);

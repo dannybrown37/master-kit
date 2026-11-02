@@ -37,6 +37,7 @@ import { AlbumView } from "../album/view.ts";
 import { DrillView } from "../drills/view.ts";
 import { trackUrl } from "../audio/tracks.ts";
 import { pickAudioFile, songTitle } from "../master/library.ts";
+import { SYNC_LOCKED_KEYS, assertSameLength, isVideoName } from "../master/video.ts";
 import { MeterBar, button, clock, db, download, h, keyButton, setLabel, signed } from "./dom.ts";
 import { Palette } from "./palette.ts";
 import type { Command } from "./palette.ts";
@@ -168,6 +169,8 @@ export class Desk {
   protected readonly engine: Engine;
   protected state: EngineState;
   protected track = "";
+  /** The song is a video's sound: Lead-in and Tail are locked at 0 and export must keep the exact length. */
+  protected video = false;
   protected originalReport: Report | null = null;
   protected measured: Measured | null = null;
   /** The song decoded at its file's own sample rate: what gets measured, rendered and exported. */
@@ -283,7 +286,7 @@ export class Desk {
     this.tracks = tracks;
     this.fileInput = h("input");
     this.fileInput.type = "file";
-    this.fileInput.accept = "audio/*";
+    this.fileInput.accept = "audio/*,video/*";
     this.fileInput.hidden = true;
     this.fileInput.onchange = (): void => {
       const file = this.fileInput.files?.[0];
@@ -345,7 +348,7 @@ export class Desk {
     tabs.setAttribute("aria-label", "Mode");
     this.refFile = h("input");
     this.refFile.type = "file";
-    this.refFile.accept = "audio/*";
+    this.refFile.accept = "audio/*,video/*";
     this.refFile.hidden = true;
     this.refFile.onchange = (): void => {
       const file = this.refFile.files?.[0];
@@ -648,7 +651,7 @@ export class Desk {
   }
 
   private loadFile(file: File): void {
-    this.run(file.arrayBuffer().then((data) => this.loadData(file.name, data)));
+    this.run(file.arrayBuffer().then((data) => this.loadData(file.name, data, null, isVideoName(file.name, file.type))));
   }
 
   private async loadTrack(name: string, settings: Settings | null = null): Promise<void> {
@@ -657,12 +660,14 @@ export class Desk {
     await this.loadData(name, await res.arrayBuffer(), settings);
   }
 
-  protected async loadData(name: string, data: ArrayBuffer, settings: Settings | null = null): Promise<void> {
+  protected async loadData(name: string, data: ArrayBuffer, settings: Settings | null = null, video = isVideoName(name)): Promise<void> {
     this.say(`loading ${name}…`);
     const copy = data.slice(0);
     await this.engine.load(data);
     this.track = name;
+    this.video = video;
     saveLastTrack(name);
+    this.engine.setVideo(video);
     this.engine.setAll(settings ?? loadSettings(name) ?? defaultSettings());
     this.genreOverride = null;
     this.shoot = null;
@@ -761,7 +766,7 @@ export class Desk {
       const auto = await runAutoMaster(
         await native,
         original,
-        { reference: ref, genre: this.currentGenre(), taste: tasteLean(loadTaste()) },
+        { reference: ref, genre: this.currentGenre(), taste: tasteLean(loadTaste()), video: this.video },
         (text) => {
           this.busy = text;
           this.schedule();
@@ -795,7 +800,7 @@ export class Desk {
       const result = await runShootout(
         await native,
         original,
-        { reference: this.reference?.report ?? null, genre: this.currentGenre() },
+        { reference: this.reference?.report ?? null, genre: this.currentGenre(), video: this.video },
         (text) => {
           this.busy = text;
           this.schedule();
@@ -885,7 +890,9 @@ export class Desk {
     const m = await this.measureMaster();
     if (!m) return;
     const { settings, bypass } = this.state;
-    const wav = encodeWav(applyEdges(m.rendered.master, m.rendered.sampleRate, edgeParams(settings, bypass)), m.rendered.sampleRate, bits);
+    const out = applyEdges(m.rendered.master, m.rendered.sampleRate, edgeParams(settings, bypass));
+    if (this.video && this.native) assertSameLength((await this.native).length, out[0].length);
+    const wav = encodeWav(out, m.rendered.sampleRate, bits);
     const name = `${safeBaseName(this.track)} (master ${bits}-bit).wav`;
     download(new Blob([wav], { type: "audio/wav" }), name);
     const r = m.report;
@@ -896,6 +903,10 @@ export class Desk {
   /** `group` null makes the change its own undo step (resets, hints); otherwise quick turns of one knob merge. */
   private setKnob(key: ParamKey, value: number, group: string | null = key): void {
     const before = this.engine.state.settings;
+    if (this.video && (SYNC_LOCKED_KEYS as readonly ParamKey[]).includes(key) && clampParam(key, value) !== 0) {
+      this.say(`${PARAMS.find((p) => p.key === key)?.label ?? key} stays at 0 for a video: silence there would shift the sound off the picture`);
+      return;
+    }
     if (clampParam(key, value) === before[key]) return;
     this.history.record(before, group, performance.now());
     this.engine.set(key, value);
@@ -1354,7 +1365,7 @@ export class Desk {
       return;
     }
     const measured = this.measured?.key === this.currentKey() ? this.measured.report : null;
-    this.currentHints = hints({ original: o, master: measured, settings: this.state.settings, bypass: this.state.bypass, reference: this.reference?.report });
+    this.currentHints = hints({ original: o, master: measured, settings: this.state.settings, bypass: this.state.bypass, reference: this.reference?.report, video: this.video });
     const signature = JSON.stringify([this.currentHints, this.reference?.name, !!this.reference?.report, this.autoSteps]);
     if (signature === this.hintsSignature) return;
     if (this.autoEl?.dataset.steps !== JSON.stringify(this.autoSteps)) {

@@ -15,6 +15,9 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
   bit-exact −144 dB). The way to verify audio-engine changes from WSL. `tools/chrome.ts` has the CDP helpers (also for screenshots).
 - `just automaster <track> [--ref <track>] [--genre KEY] [--wav FILE] [--session FILE] [--json]`: auto-master in headless Chrome
   (page route `/?auto=1[&genre=]`, same `autoMaster()` as the Desk's `A`); prints the reasons, knobs and before/after.
+- `just remux <video> <master.wav> [--out FILE] [--force]`: puts a Desk-exported master back under its video. Refuses a
+  master that's offset or a different length; muxes, measures the new audio against the old on the file's timeline,
+  corrects in samples (container timestamps round), and writes `--out` only at ≤ 0.25 ms.
 - `just album <track>... | --all [--out DIR] [--bits 24|16] [--genre KEY]`: the `/?auto=1` route per song, then
   `applyEdges` + `encodeWav` in Node; numbered WAVs + loudness spread.
 
@@ -128,6 +131,11 @@ Perf: a render of a 3 min song takes ~4.5 s in headless Chrome (+~1 s multiband,
 auto-master ~35 s, a shootout ~35 s, `just album` ~23 s per song. DSP speed-ups must stay bit-identical; compare old vs
 new on a real song (copy the old class into `out/`, process the same PCM through both, count differing samples).
 Memory: the Desk keeps only the master of a render (`MasterAudio`); `l` keeps only its closest render.
+
+Video (`src/master/video.ts`): mp4/mov/webm/mkv (or any `video/*` type) load as songs; `fileSampleRate` reads their
+rate. Sync is absolute: `Engine.setVideo` runs every settings change through `lockSync` (Lead-in and Tail = 0), auto-master
+and hints skip those knobs (`video` in `PlanInput`/`HintInput`), and Desk export throws unless the WAV has the source's
+exact frame count. Chrome and ffmpeg decode AAC/Opus starts identically (0-sample offset, checked), so the master is aligned.
 
 Hints must not contradict each other: a suggestion stops short of what another hint warns about (width < 150%,
 EQ within ±5.5 dB); tests apply each suggestion and check no warning appears.
