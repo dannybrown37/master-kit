@@ -37,7 +37,8 @@ import { AlbumView } from "../album/view.ts";
 import { DrillView } from "../drills/view.ts";
 import { trackUrl } from "../audio/tracks.ts";
 import { pickAudioFile, songTitle } from "../master/library.ts";
-import { SYNC_LOCKED_KEYS, assertSameLength, isVideoName, videoExportName } from "../master/video.ts";
+import { REMUX_HEADER, SYNC_LOCKED_KEYS, assertSameLength, isVideoName, remuxOutcome, videoExportName } from "../master/video.ts";
+import { HANDOFF_TIMEOUT_MS, handoffMessage, isShaderReady, shaderOrigin, videoMimeType } from "../master/handoff.ts";
 import { MeterBar, button, clock, db, download, h, keyButton, setLabel, signed } from "./dom.ts";
 import { Palette } from "./palette.ts";
 import type { Command } from "./palette.ts";
@@ -173,6 +174,8 @@ export class Desk {
   protected video = false;
   /** The video file itself, kept for Export video (decoding detaches the other copies). */
   private videoBytes: ArrayBuffer | null = null;
+  /** The picked file's own MIME type ("" for library tracks). */
+  private videoType = "";
   protected originalReport: Report | null = null;
   protected measured: Measured | null = null;
   /** The song decoded at its file's own sample rate: what gets measured, rendered and exported. */
@@ -261,6 +264,8 @@ export class Desk {
   private readonly abButton: HTMLButtonElement;
   private readonly measureButton: HTMLButtonElement;
   private readonly exportButton: HTMLButtonElement;
+  private readonly shaderButton: HTMLButtonElement;
+  private readonly shaderOrigin = shaderOrigin(location.origin);
   private readonly refButton: HTMLButtonElement;
   private readonly snapButton: HTMLButtonElement;
   protected readonly toolbar: HTMLElement;
@@ -317,6 +322,8 @@ export class Desk {
     this.measureButton = keyButton("Measure", "m", () => this.run(this.measureMaster()), "render the whole song offline and score it");
     this.exportButton = keyButton("Export", "e", () => this.run(this.exportMain()), "24-bit WAV, or the video with the master under it (E: 16-bit WAV)");
     this.exportButton.classList.add("primary");
+    this.shaderButton = button("Open in Music Shader", () => this.openInShader(), "send this video and its master to Music Shader to add visuals");
+    this.shaderButton.hidden = true;
     this.refButton = keyButton("Ref", "r", () => this.engine.toggleReference(), "hear the reference at the master's loudness");
     this.monoButton = keyButton("Mono", "o", () => this.engine.toggleMono(), "listen summed to mono (phone speaker, club PA)");
     this.streamButton = keyButton("Stream", "p", () => this.cycleStream(), "hear it the way Spotify / Apple Music / YouTube play it back (their loudness normalization)");
@@ -330,7 +337,7 @@ export class Desk {
       progress,
       this.listenEl,
       h("div", "group", this.abButton, this.refButton, this.monoButton, this.streamButton, saveSnap, this.snapButton),
-      h("div", "group", auto, this.measureButton, this.exportButton),
+      h("div", "group", auto, this.measureButton, this.exportButton, this.shaderButton),
     );
 
     this.drills = new DrillView(engine.ctx, () => engine.loaded);
@@ -536,6 +543,7 @@ export class Desk {
       cmd("Master", "Measure the whole song", () => this.measureMaster(), "m", { terms: "score render" }),
       cmd("Master", "Restart the meters", () => this.engine.resetMeters(), "z", { terms: "zero" }),
       ...(this.video ? [cmd("File", "Export video (master under the picture)", () => this.exportVideo(), "e", { terms: "download save mp4 mux" })] : []),
+      ...(this.video && this.shaderOrigin ? [cmd("File", "Open in Music Shader", () => this.openInShader(), undefined, { terms: "visuals shader send" })] : []),
       cmd("File", "Export WAV 24-bit", () => this.exportWav(24), this.video ? undefined : "e", { terms: "download save" }),
       cmd("File", "Export WAV 16-bit (dithered)", () => this.exportWav(16), "E", { terms: "download save cd" }),
       cmd("File", "Save session to a file", () => this.saveSession(), undefined, { terms: "json download" }),
@@ -654,7 +662,7 @@ export class Desk {
   }
 
   private loadFile(file: File): void {
-    this.run(file.arrayBuffer().then((data) => this.loadData(file.name, data, null, isVideoName(file.name, file.type))));
+    this.run(file.arrayBuffer().then((data) => this.loadData(file.name, data, null, isVideoName(file.name, file.type), file.type)));
   }
 
   private async loadTrack(name: string, settings: Settings | null = null): Promise<void> {
@@ -663,10 +671,11 @@ export class Desk {
     await this.loadData(name, await res.arrayBuffer(), settings);
   }
 
-  protected async loadData(name: string, data: ArrayBuffer, settings: Settings | null = null, video = isVideoName(name)): Promise<void> {
+  protected async loadData(name: string, data: ArrayBuffer, settings: Settings | null = null, video = isVideoName(name), mimeType = ""): Promise<void> {
     this.say(`loading ${name}…`);
     const copy = data.slice(0);
     this.videoBytes = video ? data.slice(0) : null;
+    this.videoType = video ? mimeType : "";
     await this.engine.load(data);
     this.track = name;
     this.video = video;
@@ -890,7 +899,7 @@ export class Desk {
   }
 
   /** The full-song master (rendered or reused) as WAV at the song's own sample rate, edges applied. */
-  private async masterWav(bits: BitDepth): Promise<{ wav: ArrayBuffer; name: string; summary: string } | null> {
+  private async masterWav(bits: BitDepth): Promise<{ wav: ArrayBuffer; name: string; summary: string; channels: Float32Array[]; sampleRate: number } | null> {
     const m = await this.measureMaster();
     if (!m) return null;
     const { settings, bypass } = this.state;
@@ -901,7 +910,66 @@ export class Desk {
       wav: encodeWav(out, m.rendered.sampleRate, bits),
       name: `${safeBaseName(this.track)} (master ${bits}-bit).wav`,
       summary: `${(m.rendered.sampleRate / 1000).toFixed(1)} kHz · ${db(r.integrated)} LUFS · ${db(r.truePeak)} dBTP`,
+      channels: out,
+      sampleRate: m.rendered.sampleRate,
     };
+  }
+
+  /**
+   * Opens Music Shader first (synchronously, inside the click, so popup blockers allow it), renders the master while
+   * it loads, and posts video + WAV once the shader says ready. Gives up after 20 s or if the window closes.
+   */
+  private openInShader(): void {
+    const origin = this.shaderOrigin;
+    const video = this.videoBytes;
+    if (!origin || !video || !this.video) return;
+    const win = window.open(`${origin}/?handoff=1`);
+    if (!win) {
+      this.say("the browser blocked the Music Shader window: allow pop-ups for this site and try again", true);
+      return;
+    }
+    const name = this.track;
+    const ready = new Promise<void>((resolve, reject) => {
+      const done = (): void => {
+        window.removeEventListener("message", onMessage);
+        clearInterval(closedPoll);
+        clearTimeout(timer);
+      };
+      const onMessage = (e: MessageEvent): void => {
+        if (!isShaderReady(e, origin, win)) return;
+        done();
+        resolve();
+      };
+      const fail = (why: string) => (): void => {
+        done();
+        reject(new Error(why));
+      };
+      const closedPoll = setInterval(() => win.closed && fail("the Music Shader window was closed")(), 500);
+      const timer = setTimeout(fail("Music Shader didn't answer within 20 s"), HANDOFF_TIMEOUT_MS);
+      window.addEventListener("message", onMessage);
+    });
+    ready.catch(() => {});
+    this.run(
+      (async (): Promise<void> => {
+        // masterWav shows its own "rendering…" (and refuses while anything else is busy).
+        const w = await this.masterWav(24);
+        if (!w) {
+          if (!win.closed) win.close();
+          this.say("not sent to Music Shader: the master couldn't render right now (busy?); try again", true);
+          return;
+        }
+        this.say("waiting for Music Shader…");
+        try {
+          await ready;
+        } catch (e) {
+          this.say(`not sent to Music Shader: ${e instanceof Error ? e.message : String(e)}`, true);
+          return;
+        }
+        const file = new File([video], name, { type: this.videoType || videoMimeType(name) });
+        win.postMessage(handoffMessage(name, file, new Blob([w.wav], { type: "audio/wav" })), origin);
+        this.say(`sent "${name}" and its master to Music Shader · ${w.summary}`);
+      })(),
+    );
   }
 
   private exportMain(): Promise<void> {
@@ -924,27 +992,50 @@ export class Desk {
     if (!w) return;
     this.busy = "putting the master under the picture (checking sync)…";
     this.schedule();
-    let res: Response;
+    let browserProblem: string;
     try {
-      const q = new URLSearchParams({ name: this.track, videoBytes: String(video.byteLength) });
-      res = await fetch(`/api/remux?${q}`, { method: "POST", body: new Blob([video, w.wav]) });
+      const { muxVideo } = await import("../audio/mux.ts");
+      const muxed = await muxVideo(video, this.track, w.channels, w.sampleRate);
+      const name = videoExportName(this.track);
+      download(muxed.blob, name);
+      this.exported = true;
+      this.say(`exported "${name}" · in sync (${muxed.lagSamples} samples) · ${muxed.codec.toUpperCase()} · ${w.summary}`);
+      return;
+    } catch (e) {
+      browserProblem = e instanceof Error ? e.message : String(e);
+      console.warn(`in-browser Export video failed: ${browserProblem}`);
     } finally {
       this.busy = "";
     }
-    if (res.status === 404) {
+    this.busy = "putting the master under the picture on the dev server…";
+    this.schedule();
+    const call = async (init?: RequestInit, query = ""): Promise<Response | null> => fetch(`/api/remux${query}`, init).catch(() => null);
+    const outcome = (r: Response | null): ReturnType<typeof remuxOutcome> => remuxOutcome(r?.status ?? null, r?.headers.has(REMUX_HEADER) ?? false);
+    let res: Response | null = null;
+    try {
+      // A cheap probe first, so a static host doesn't get the whole video uploaded just to answer 405.
+      if (outcome(await call()) !== "unavailable") {
+        const q = new URLSearchParams({ name: this.track, videoBytes: String(video.byteLength) });
+        res = await call({ method: "POST", body: new Blob([video, w.wav]) }, `?${q}`);
+      }
+    } finally {
+      this.busy = "";
+    }
+    const result = outcome(res);
+    if (result === "unavailable" || !res) {
       download(new Blob([w.wav], { type: "audio/wav" }), w.name);
       this.exported = true;
-      this.say(`Export video needs the dev server (just dev); exported "${w.name}" instead: just remux "<video>" "${w.name}"`, true);
+      this.say(`couldn't make the video here (${browserProblem}); exported "${w.name}" instead. Put it under the picture with: just remux "${this.track}" "${w.name}"`, true);
       return;
     }
-    if (!res.ok) {
-      this.say(`video not exported: ${await res.text()}`, true);
+    if (result === "refused") {
+      this.say(`video not exported: ${browserProblem}; the dev server also refused: ${await res.text()}`, true);
       return;
     }
     const name = videoExportName(this.track);
     download(await res.blob(), name);
     this.exported = true;
-    this.say(`exported "${name}" · in sync · ${w.summary}`);
+    this.say(`exported "${name}" · in sync (dev server; in-browser failed: ${browserProblem}) · ${w.summary}`);
   }
 
   /** `group` null makes the change its own undo step (resets, hints); otherwise quick turns of one knob merge. */
@@ -1247,6 +1338,9 @@ export class Desk {
     this.measureButton.disabled = !!this.busy || !this.engine.loaded;
     this.exportButton.disabled = this.measureButton.disabled;
     setLabel(this.exportButton, this.video ? "Export video" : "Export");
+    const showShader = this.video && this.shaderOrigin !== null;
+    if (this.shaderButton.hidden === showShader) this.shaderButton.hidden = !showShader;
+    this.shaderButton.disabled = this.exportButton.disabled;
 
     const current = selected(this.nav);
     for (const [key, view] of this.knobs) {

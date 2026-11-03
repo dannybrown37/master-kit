@@ -18,6 +18,7 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
 - `just remux <video> <master.wav> [--out FILE] [--force]`: puts a Desk-exported master back under its video. Refuses a
   master that's offset or a different length; muxes, measures the new audio against the old on the file's timeline,
   corrects in samples (container timestamps round), and writes `--out` only at ≤ 0.25 ms.
+- `just synccheck <original> <exported>`: ffmpeg check of any exported video (picture bit-identical, sound ≤ 0.25 ms).
 - `just album <track>... | --all [--out DIR] [--bits 24|16] [--genre KEY]`: the `/?auto=1` route per song, then
   `applyEdges` + `encodeWav` in Node; numbered WAVs + loudness spread.
 
@@ -135,7 +136,13 @@ Memory: the Desk keeps only the master of a render (`MasterAudio`); `l` keeps on
 Video (`src/master/video.ts`): mp4/mov/webm/mkv (or any `video/*` type) load as songs; `fileSampleRate` reads their
 rate. Sync is absolute: `Engine.setVideo` runs every settings change through `lockSync` (Lead-in and Tail = 0), auto-master
 and hints skip those knobs (`video` in `PlanInput`/`HintInput`), and Desk export throws unless the WAV has the source's
-exact frame count. With a video loaded, `e` / the button is "Export video": the Desk POSTs video + WAV to the dev server's
+exact frame count. With a video loaded, `e` / the button is "Export video": first in the browser (`src/audio/mux.ts`,
+mediabunny, lazy-loaded): picture packets copied, master encoded per `muxPlan` (MP4 = AAC only; MOV AAC/PCM; WebM Opus;
+MKV FLAC/PCM), then decoded back and measured against the original (players' back-to-back placement), shifting samples
+and re-muxing until ≤ 0.25 ms. Chrome's Opus encoder delay (648) ≠ the pre-skip it reports (312): `alignOpusPreSkip`
+patches Matroska headers; Opus-in-MP4 is refused for the same reason. `just synccheck <orig> <exported>` checks any
+export with ffmpeg (`videoChecks`; timeline decodes need `-copyts`, else WebM's negative start shifts them). If the
+browser path fails (e.g. Linux Chrome has no AAC encoder), the Desk POSTs video + WAV to the dev server's
 `/api/remux` (`videoRemux` in `vite.config.ts`, body split by `parseRemuxUpload`), which runs `tools/remux.ts` and returns
 the file or remux's refusal; no dev server (404) → WAV + the `just remux` line. `just export <video>` drives that button and
 checks the picture is bit-identical (`videoMd5`) and the sound in sync (`lagAgainstPicture`). Chrome and ffmpeg decode AAC/Opus starts identically (0-sample offset, checked), so the master is aligned.

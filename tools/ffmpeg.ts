@@ -30,10 +30,15 @@ export function decode(path: string): Decoded {
   return { channels, sampleRate };
 }
 
-/** First audio stream at a chosen rate. `onTimeline`: padded with silence from t = 0, so a sample's index is where players put it, priming and all. */
+/**
+ * First audio stream at a chosen rate. `onTimeline`: sample i plays at i / rate seconds on the file's own timeline
+ * (padded or trimmed at t = 0, priming and all). `-copyts` matters: without it ffmpeg shifts every timestamp so the
+ * earliest is 0, which moves sound that starts before 0 (WebM Opus) against ffprobe's video start_time.
+ */
 export function audioAt(path: string, sampleRate: number, channels: number, onTimeline = false): Float32Array[] {
   const timeline = onTimeline ? ["-af", "aresample=async=1:first_pts=0"] : [];
-  const { stdout } = run("ffmpeg", ["-v", "error", "-i", path, "-map", "0:a:0", ...timeline, "-ar", String(sampleRate), "-ac", String(channels), "-f", "f32le", "-acodec", "pcm_f32le", "-"]);
+  const copyts = onTimeline ? ["-copyts"] : [];
+  const { stdout } = run("ffmpeg", ["-v", "error", ...copyts, "-i", path, "-map", "0:a:0", ...timeline, "-ar", String(sampleRate), "-ac", String(channels), "-f", "f32le", "-acodec", "pcm_f32le", "-"]);
   const all = new Float32Array(stdout.buffer, stdout.byteOffset, Math.floor(stdout.byteLength / 4));
   const frames = Math.floor(all.length / channels);
   return Array.from({ length: channels }, (_, c) => Float32Array.from({ length: frames }, (_, i) => all[i * channels + c]));
@@ -61,6 +66,16 @@ export function startTime(path: string, type: string): number {
 export function lagAgainstPicture(source: string, out: string, rate: number, channels: number, sourceAudio = audioAt(source, rate, channels, true)): number {
   const shift = Math.round((startTime(out, "video") - startTime(source, "video")) * rate);
   return syncOffset(audioAt(out, rate, channels, true), sourceAudio, rate) - shift;
+}
+
+/** The picture is bit-identical and the new sound sits against it within 0.25 ms of where the old one did. */
+export function videoChecks(source: string, out: string, rate: number, channels: number, log: (line: string) => void): boolean {
+  const same = videoMd5(source) === videoMd5(out);
+  log(`video stream: ${same ? "bit-identical to the source ✓" : "changed ✗"}`);
+  const lag = lagAgainstPicture(source, out, rate, channels);
+  const synced = Math.abs(lag) <= 0.00025 * rate;
+  log(`sync against the picture: ${lag} samples (${((lag / rate) * 1000).toFixed(2)} ms) ${synced ? "✓" : "✗"}`);
+  return same && synced;
 }
 
 /** MD5 of a file's video packets, copied: equal means the picture is bit-for-bit untouched. */

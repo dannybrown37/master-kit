@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { defineConfig } from "vitest/config";
 import type { Plugin } from "vite";
-import { parseRemuxUpload } from "./src/master/video.ts";
+import { REMUX_HEADER, parseRemuxUpload } from "./src/master/video.ts";
 
 const MIME: Record<string, string> = {
   ".mp3": "audio/mpeg",
@@ -86,6 +86,7 @@ function videoRemux(): Plugin {
     name: "video-remux",
     configureServer(server) {
       server.middlewares.use("/api/remux", (req, res) => {
+        res.setHeader(REMUX_HEADER, "1");
         if (req.method !== "POST") return fail(res, 405, "POST only");
         void (async (): Promise<void> => {
           const body = await readBody(req);

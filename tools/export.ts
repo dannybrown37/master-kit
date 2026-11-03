@@ -4,16 +4,16 @@
  *
  *   node tools/export.ts <track> [--set JSON] [--bits 24|16] [--out out/master.wav]
  */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { TARGETS } from "../src/analysis/targets.ts";
 import { fileSampleRate } from "../src/audio/sample-rate.ts";
 import { sleep, startSession } from "./chrome.ts";
 import { isVideoName, videoExportName } from "../src/master/video.ts";
-import { decode, ffmpegEbur128, lagAgainstPicture, videoMd5 } from "./ffmpeg.ts";
+import { decode, ffmpegEbur128, videoChecks } from "./ffmpeg.ts";
 
 const USAGE = `Usage: just export <track> [--set JSON] [--bits 24|16] [--out FILE]
 
@@ -21,14 +21,20 @@ Exports <track> (a file name in MUSIC_DIR) through the Desk's export button and 
 A video exports as a video (dev server remux): also checks the picture is untouched and the sound in sync.
 Default --out: out/<track> (master).wav`;
 
-async function waitForDownload(dir: string, seconds: number): Promise<string> {
+/** The first file with one of `exts` whose size has stopped changing (Chrome writes temp files alongside). */
+async function waitForDownload(dir: string, exts: string[], seconds: number): Promise<string> {
   const deadline = Date.now() + seconds * 1000;
+  let last = -1;
   while (Date.now() < deadline) {
-    const done = readdirSync(dir).find((f) => !f.endsWith(".crdownload") && !f.startsWith("."));
-    if (done) return join(dir, done);
-    await sleep(250);
+    const done = readdirSync(dir).find((f) => exts.some((e) => f.toLowerCase().endsWith(e)));
+    if (done) {
+      const size = statSync(join(dir, done)).size;
+      if (size > 0 && size === last) return join(dir, done);
+      last = size;
+    }
+    await sleep(500);
   }
-  throw new Error(`nothing downloaded after ${seconds} s`);
+  throw new Error(`no ${exts.join("/")} downloaded after ${seconds} s`);
 }
 
 async function main(): Promise<number> {
@@ -68,8 +74,8 @@ async function main(): Promise<number> {
     await cdp.waitReady(60);
     const t0 = Date.now();
     await cdp.key(values.bits === "16" ? "E" : "e");
-    const file = await waitForDownload(downloads, 300);
-    await sleep(500);
+    const exts = video && values.bits !== "16" ? [extname(videoExportName(track)).toLowerCase(), ".wav"] : [".wav"];
+    const file = await waitForDownload(downloads, exts, 300);
     console.log(`downloaded in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${await cdp.evaluate<string>("document.querySelector('.message').textContent")}`);
     mkdirSync(dirname(out), { recursive: true });
     renameSync(file, out);
@@ -89,17 +95,8 @@ async function main(): Promise<number> {
   const sourceRate = fileSampleRate(source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength));
   const rateOk = sourceRate === null || sourceRate === sampleRate;
   console.log(`sample rate: ${sampleRate} Hz, source ${sourceRate ?? "unknown"} Hz ${rateOk ? "✓" : "✗"}`);
-  return ok && rateOk && (!isVideoName(out) || videoChecks(sourcePath, out, sampleRate, channels.length)) ? 0 : 1;
-}
-
-/** The picture is bit-identical and the new sound sits against it within 0.25 ms of where the old one did. */
-function videoChecks(source: string, out: string, rate: number, channels: number): boolean {
-  const same = videoMd5(source) === videoMd5(out);
-  console.log(`video stream: ${same ? "bit-identical to the source ✓" : "changed ✗"}`);
-  const lag = lagAgainstPicture(source, out, rate, channels);
-  const synced = Math.abs(lag) <= 0.00025 * rate;
-  console.log(`sync against the picture: ${lag} samples (${((lag / rate) * 1000).toFixed(2)} ms) ${synced ? "✓" : "✗"}`);
-  return same && synced;
+  const videoOk = !isVideoName(out) || videoChecks(sourcePath, out, sampleRate, channels.length, console.log);
+  return ok && rateOk && videoOk ? 0 : 1;
 }
 
 main().then(

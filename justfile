@@ -47,6 +47,10 @@ export *args:
 remux *args:
     @node tools/remux.ts "$@"
 
+# Check an exported video against its original with ffmpeg (picture untouched, sound in sync): just synccheck <original> <exported>
+synccheck *args:
+    @node tools/synccheck.ts "$@"
+
 # Screenshot the Desk at desktop and mobile width: just shot [track] [--play S] [--keys K1,K2] [--name NAME]
 shot *args:
     @node tools/shot.ts "$@"

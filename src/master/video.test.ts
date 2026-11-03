@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./settings.ts";
-import { assertSameLength, fitLength, isVideoName, lockSync, parseRemuxUpload, shiftStart, syncOffset, videoExportName } from "./video.ts";
+import { alignOpusPreSkip, assertSameLength, fitLength, isVideoName, lockSync, muxPlan, parseRemuxUpload, placeOnTimeline, remuxOutcome, shiftStart, syncOffset, videoExportName } from "./video.ts";
 
 const RATE = 48000;
 
@@ -75,6 +75,93 @@ describe("parseRemuxUpload", () => {
     ["odd extension characters", { name: "a.m$4", videoBytes: "10" }],
   ])("rejects %s", (_name, params) => {
     expect(() => parseRemuxUpload(q(params), 100)).toThrow();
+  });
+});
+
+describe("remuxOutcome", () => {
+  it.each([
+    ["our endpoint, ok", 200, true, "video"],
+    ["our endpoint refused (sync)", 422, true, "refused"],
+    ["our endpoint, bad request", 400, true, "refused"],
+    ["static host 405 (nginx)", 405, false, "unavailable"],
+    ["static host 404", 404, false, "unavailable"],
+    ["SPA fallback serving index.html with 200", 200, false, "unavailable"],
+    ["network error", null, false, "unavailable"],
+  ] as const)("%s → %s", (_name, status, ours, want) => {
+    expect(remuxOutcome(status, ours)).toBe(want);
+  });
+});
+
+describe("muxPlan", () => {
+  it.each([
+    ["clip.mp4", { container: "mp4", codecs: ["aac"] }],
+    ["clip.M4V", { container: "mp4", codecs: ["aac"] }],
+    ["clip.mov", { container: "mov", codecs: ["aac", "pcm-s24"] }],
+    ["clip.webm", { container: "webm", codecs: ["opus"] }],
+    ["clip.mkv", { container: "mkv", codecs: ["flac", "pcm-s24"] }],
+    ["old.avi", { container: "mkv", codecs: ["flac", "pcm-s24"] }],
+  ] as const)("%s", (name, want) => {
+    expect(muxPlan(name)).toEqual(want);
+  });
+});
+
+describe("placeOnTimeline", () => {
+  const chunk = (timestamp: number, ...values: number[]): { timestamp: number; channels: Float32Array[] } => ({ timestamp, channels: [Float32Array.from(values)] });
+
+  it("puts each chunk at its timestamp relative to `from`, silence in the gaps", () => {
+    const out = placeOnTimeline([chunk(0.2, 1, 2), chunk(0.5, 3)], 0.1, 6, 10, 1);
+    expect([...out[0]]).toEqual([0, 1, 2, 0, 3, 0]);
+  });
+
+  it("clips chunks that start before `from` or run past the end", () => {
+    const out = placeOnTimeline([chunk(0, 1, 2, 3), chunk(0.4, 4, 5, 6)], 0.1, 4, 10, 1);
+    expect([...out[0]]).toEqual([2, 3, 0, 4]);
+  });
+
+  it("rounds timestamps to the nearest sample", () => {
+    const out = placeOnTimeline([chunk(0.10004, 7)], 0, 3, 10, 1);
+    expect([...out[0]]).toEqual([0, 7, 0]);
+  });
+});
+
+describe("alignOpusPreSkip", () => {
+  /** Tracks with CodecDelay (8-byte uint, ns) and an OpusHead CodecPrivate, then a Cluster holding `clusterBytes`. */
+  function webm(codecDelayNs: number | null, preSkip: number, clusterBytes: number[] = []): Uint8Array {
+    const head = [...new TextEncoder().encode("OpusHead"), 1, 2, preSkip & 0xff, preSkip >> 8, 0x80, 0xbb, 0, 0, 0, 0, 0];
+    const delay = codecDelayNs === null ? [] : [0x56, 0xaa, 0x88, ...new Array<number>(4).fill(0), (codecDelayNs >>> 24) & 0xff, (codecDelayNs >> 16) & 0xff, (codecDelayNs >> 8) & 0xff, codecDelayNs & 0xff];
+    const entry = [...delay, 0x63, 0xa2, 0x80 | head.length, ...head];
+    return Uint8Array.from([0x16, 0x54, 0xae, 0x6b, 0x80 | (entry.length + 2), 0xae, 0x80 | entry.length, ...entry, 0x1f, 0x43, 0xb6, 0x75, 0x80 | clusterBytes.length, ...clusterBytes]);
+  }
+  const preSkipOf = (b: Uint8Array): number => {
+    const at = new TextDecoder("latin1").decode(b).indexOf("OpusHead");
+    return b[at + 10] | (b[at + 11] << 8);
+  };
+
+  it("sets pre-skip to the CodecDelay (13.5 ms = 648 samples at 48 kHz)", () => {
+    const b = webm(13_500_000, 312);
+    expect(alignOpusPreSkip(b)).toBe(648);
+    expect(preSkipOf(b)).toBe(648);
+  });
+
+  it("leaves an already consistent file alone", () => {
+    const b = webm(6_500_000, 312);
+    expect(alignOpusPreSkip(b)).toBe(312);
+    expect(preSkipOf(b)).toBe(312);
+  });
+
+  it.each([
+    ["no CodecDelay", webm(null, 312)],
+    ["not Opus", Uint8Array.from([0x16, 0x54, 0xae, 0x6b, 0x80])],
+  ])("%s → null, untouched", (_name, b) => {
+    const before = [...b];
+    expect(alignOpusPreSkip(b)).toBeNull();
+    expect([...b]).toEqual(before);
+  });
+
+  it("never reads a lookalike inside the media data (after the first Cluster)", () => {
+    const fake = [0x56, 0xaa, 0x88, 0, 0, 0, 0, 0, 0, 0, 1, ...new TextEncoder().encode("OpusHead"), 1, 2, 0x38, 0x01];
+    const b = Uint8Array.from([0x1f, 0x43, 0xb6, 0x75, 0x80 | fake.length, ...fake]);
+    expect(alignOpusPreSkip(b)).toBeNull();
   });
 });
 

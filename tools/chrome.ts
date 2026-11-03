@@ -140,6 +140,8 @@ export async function startSession(width = 1000, height = 700): Promise<Session>
       `--remote-debugging-port=${DEBUG_PORT}`,
       `--user-data-dir=${mkdtempSync(join(tmpdir(), "master-kit-"))}`,
       "--autoplay-policy=no-user-gesture-required",
+      // Lets probes test window.open handoffs (headless closes popups otherwise).
+      "--disable-popup-blocking",
       `--window-size=${width},${height}`,
       "about:blank",
     ],
