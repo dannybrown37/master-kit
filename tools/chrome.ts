@@ -128,7 +128,7 @@ export interface Session {
 }
 
 /** Starts Vite on a free port and a headless Chrome attached to it. */
-export async function startSession(width = 1000, height = 700): Promise<Session> {
+export async function startSession(width = 1000, height = 700, chromeArgs: string[] = []): Promise<Session> {
   const server: ViteDevServer = await createServer({ server: { port: 0, strictPort: false, host: "127.0.0.1" }, logLevel: "error" });
   await server.listen();
   const address = server.httpServer?.address();
@@ -143,6 +143,7 @@ export async function startSession(width = 1000, height = 700): Promise<Session>
       // Lets probes test window.open handoffs (headless closes popups otherwise).
       "--disable-popup-blocking",
       `--window-size=${width},${height}`,
+      ...chromeArgs,
       "about:blank",
     ],
     { stdio: "ignore" },

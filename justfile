@@ -51,6 +51,10 @@ remux *args:
 synccheck *args:
     @node tools/synccheck.ts "$@"
 
+# Prove "Open in Music Shader" sends the master (stand-in shader, byte-compare with the WAV export): just handoffcheck <video>
+handoffcheck *args:
+    @node tools/handoffcheck.ts "$@"
+
 # Screenshot the Desk at desktop and mobile width: just shot [track] [--play S] [--keys K1,K2] [--name NAME]
 shot *args:
     @node tools/shot.ts "$@"

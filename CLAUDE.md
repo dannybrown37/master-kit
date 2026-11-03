@@ -19,6 +19,9 @@ Mastering only (no stems). Danny does all git; never init, commit or push.
   master that's offset or a different length; muxes, measures the new audio against the old on the file's timeline,
   corrects in samples (container timestamps round), and writes `--out` only at ≤ 0.25 ms.
 - `just synccheck <original> <exported>`: ffmpeg check of any exported video (picture bit-identical, sound ≤ 0.25 ms).
+- `just handoffcheck <video> [--set JSON]`: proves "Open in Music Shader" sends the master: a stand-in shader (via a Chrome
+  proxy, so :5173 stays free) receives the handoff; the WAV must equal the Desk's Export WAV 24-bit byte for byte, match the
+  original's length, and be ≥ 3 LU louder than the original (default knobs +12 dB Drive and low shelf).
 - `just album <track>... | --all [--out DIR] [--bits 24|16] [--genre KEY]`: the `/?auto=1` route per song, then
   `applyEdges` + `encodeWav` in Node; numbered WAVs + loudness spread.
 
