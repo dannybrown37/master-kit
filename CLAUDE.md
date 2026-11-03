@@ -135,7 +135,10 @@ Memory: the Desk keeps only the master of a render (`MasterAudio`); `l` keeps on
 Video (`src/master/video.ts`): mp4/mov/webm/mkv (or any `video/*` type) load as songs; `fileSampleRate` reads their
 rate. Sync is absolute: `Engine.setVideo` runs every settings change through `lockSync` (Lead-in and Tail = 0), auto-master
 and hints skip those knobs (`video` in `PlanInput`/`HintInput`), and Desk export throws unless the WAV has the source's
-exact frame count. Chrome and ffmpeg decode AAC/Opus starts identically (0-sample offset, checked), so the master is aligned.
+exact frame count. With a video loaded, `e` / the button is "Export video": the Desk POSTs video + WAV to the dev server's
+`/api/remux` (`videoRemux` in `vite.config.ts`, body split by `parseRemuxUpload`), which runs `tools/remux.ts` and returns
+the file or remux's refusal; no dev server (404) → WAV + the `just remux` line. `just export <video>` drives that button and
+checks the picture is bit-identical (`videoMd5`) and the sound in sync (`lagAgainstPicture`). Chrome and ffmpeg decode AAC/Opus starts identically (0-sample offset, checked), so the master is aligned.
 
 Hints must not contradict each other: a suggestion stops short of what another hint warns about (width < 150%,
 EQ within ±5.5 dB); tests apply each suggestion and check no warning appears.

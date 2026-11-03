@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { syncOffset } from "../src/master/video.ts";
 
 export interface Decoded {
   channels: Float32Array[];
@@ -27,6 +28,44 @@ export function decode(path: string): Decoded {
   const channels = Array.from({ length: count }, () => new Float32Array(frames));
   for (let i = 0; i < frames; i++) for (let c = 0; c < count; c++) channels[c][i] = all[i * count + c];
   return { channels, sampleRate };
+}
+
+/** First audio stream at a chosen rate. `onTimeline`: padded with silence from t = 0, so a sample's index is where players put it, priming and all. */
+export function audioAt(path: string, sampleRate: number, channels: number, onTimeline = false): Float32Array[] {
+  const timeline = onTimeline ? ["-af", "aresample=async=1:first_pts=0"] : [];
+  const { stdout } = run("ffmpeg", ["-v", "error", "-i", path, "-map", "0:a:0", ...timeline, "-ar", String(sampleRate), "-ac", String(channels), "-f", "f32le", "-acodec", "pcm_f32le", "-"]);
+  const all = new Float32Array(stdout.buffer, stdout.byteOffset, Math.floor(stdout.byteLength / 4));
+  const frames = Math.floor(all.length / channels);
+  return Array.from({ length: channels }, (_, c) => Float32Array.from({ length: frames }, (_, i) => all[i * channels + c]));
+}
+
+interface Stream {
+  codec_type: string;
+  start_time?: string;
+}
+
+export function streams(path: string): Stream[] {
+  const { stdout } = run("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,start_time", "-of", "json", path]);
+  return (JSON.parse(stdout.toString()) as { streams?: Stream[] }).streams ?? [];
+}
+
+export function startTime(path: string, type: string): number {
+  const s = Number(streams(path).find((x) => x.codec_type === type)?.start_time);
+  return Number.isFinite(s) ? s : 0;
+}
+
+/**
+ * Samples `out`'s sound sits late (+) against its picture, compared with `source`: both decoded on their timelines,
+ * minus any shift of the (copied) video's start, since players sync sound to picture by timestamp.
+ */
+export function lagAgainstPicture(source: string, out: string, rate: number, channels: number, sourceAudio = audioAt(source, rate, channels, true)): number {
+  const shift = Math.round((startTime(out, "video") - startTime(source, "video")) * rate);
+  return syncOffset(audioAt(out, rate, channels, true), sourceAudio, rate) - shift;
+}
+
+/** MD5 of a file's video packets, copied: equal means the picture is bit-for-bit untouched. */
+export function videoMd5(path: string): string {
+  return run("ffmpeg", ["-v", "error", "-i", path, "-map", "0:v", "-c", "copy", "-f", "md5", "-"]).stdout.toString().trim();
 }
 
 export function interleave(channels: Float32Array[]): Buffer {

@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fitLength, shiftStart, syncOffset } from "../src/master/video.ts";
-import { decode, run, writeWav } from "./ffmpeg.ts";
+import type { REMUX_EXTENSIONS } from "../src/master/video.ts";
+import { audioAt, decode, lagAgainstPicture, run, startTime, streams, writeWav } from "./ffmpeg.ts";
 
 const USAGE = `Usage: just remux <video> <master.wav> [--out FILE] [--force]
 
@@ -21,7 +22,7 @@ Video and other streams are copied as-is; the audio is encoded per container:
   .mp4 .m4v .mov → AAC 320 kbps    .webm → Opus 256 kbps    .mkv → FLAC (lossless)
 Default --out: "<video name> (master).<ext>" next to the video. --force overwrites an existing --out.`;
 
-const CODECS: Record<string, string[]> = {
+const CODECS: Record<(typeof REMUX_EXTENSIONS)[number], string[]> & Partial<Record<string, string[]>> = {
   ".mp4": ["-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart"],
   ".m4v": ["-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart"],
   ".mov": ["-c:a", "aac", "-b:a", "320k"],
@@ -30,30 +31,6 @@ const CODECS: Record<string, string[]> = {
 };
 const MAX_OFFSET_SECONDS = 0.00025;
 const MAX_LENGTH_GAP_SECONDS = 0.05;
-
-interface Stream {
-  codec_type: string;
-  start_time?: string;
-}
-
-function streams(path: string): Stream[] {
-  const { stdout } = run("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,start_time", "-of", "json", path]);
-  return (JSON.parse(stdout.toString()) as { streams?: Stream[] }).streams ?? [];
-}
-
-function startTime(path: string, type: string): number {
-  const s = Number(streams(path).find((x) => x.codec_type === type)?.start_time);
-  return Number.isFinite(s) ? s : 0;
-}
-
-/** `onTimeline`: padded with silence from t = 0, so a sample's index is where players put it, priming and all. */
-function audioAt(path: string, sampleRate: number, channels: number, onTimeline = false): Float32Array[] {
-  const timeline = onTimeline ? ["-af", "aresample=async=1:first_pts=0"] : [];
-  const { stdout } = run("ffmpeg", ["-v", "error", "-i", path, "-map", "0:a:0", ...timeline, "-ar", String(sampleRate), "-ac", String(channels), "-f", "f32le", "-acodec", "pcm_f32le", "-"]);
-  const all = new Float32Array(stdout.buffer, stdout.byteOffset, Math.floor(stdout.byteLength / 4));
-  const frames = Math.floor(all.length / channels);
-  return Array.from({ length: channels }, (_, c) => Float32Array.from({ length: frames }, (_, i) => all[i * channels + c]));
-}
 
 function checkOffset(what: string, master: Float32Array[], source: Float32Array[], sampleRate: number): void {
   const lag = syncOffset(master, source, sampleRate);
@@ -127,7 +104,6 @@ function main(): number {
 function muxInSync(video: string, master: Float32Array[], frames: number, rate: number, codec: string[], tmp: string, out: string): void {
   const fitted = join(tmp, "master.wav");
   const original = audioAt(video, rate, master.length, true);
-  const videoStart = startTime(video, "video");
   const tolerance = MAX_OFFSET_SECONDS * rate;
   const offset = startTime(video, "audio");
   let earlier = 0;
@@ -141,8 +117,7 @@ function muxInSync(video: string, master: Float32Array[], frames: number, rate: 
       "-map_metadata", "0", "-map_metadata:s:a:0", "0:s:a:0",
       "-c", "copy", ...codec, out,
     ]);
-    const shift = Math.round((startTime(out, "video") - videoStart) * rate);
-    const error = syncOffset(audioAt(out, rate, master.length, true), original, rate) - shift;
+    const error = lagAgainstPicture(video, out, rate, master.length, original);
     console.log(`  against the picture, try ${attempt}: ${error} samples (${((error / rate) * 1000).toFixed(2)} ms)`);
     if (Math.abs(error) <= tolerance) return;
     earlier += error;

@@ -11,6 +11,44 @@ export function isVideoName(name: string, mimeType = ""): boolean {
   return mimeType.startsWith("video/") || VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext) && lower.length > ext.length);
 }
 
+/** Containers `just remux` writes; any other video comes back as MKV. */
+export const REMUX_EXTENSIONS = [".mp4", ".m4v", ".mov", ".webm", ".mkv"] as const;
+const WAV_HEADER_BYTES = 44;
+
+function extension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot) : "";
+}
+
+function remuxExtension(ext: string): string {
+  return (REMUX_EXTENSIONS as readonly string[]).includes(ext.toLowerCase()) ? ext : ".mkv";
+}
+
+export function videoExportName(track: string): string {
+  const ext = extension(track);
+  return `${ext ? track.slice(0, -ext.length) : track} (master)${remuxExtension(ext)}`;
+}
+
+export interface RemuxUpload {
+  videoBytes: number;
+  inExt: string;
+  outExt: string;
+}
+
+/**
+ * The dev server's /api/remux request: body = the video's bytes, then the master WAV's. Only the name's
+ * extension is used (files are written under fixed names in a temp dir), so a hostile name can't pick a path.
+ */
+export function parseRemuxUpload(query: URLSearchParams, bodyBytes: number): RemuxUpload {
+  const name = query.get("name") ?? "";
+  const raw = query.get("videoBytes") ?? "";
+  const videoBytes = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  const inExt = extension(name.split(/[\\/]/).pop() ?? "").toLowerCase();
+  if (!name || !/^\.[a-z0-9]{1,5}$/.test(inExt)) throw new RangeError("name needs a video file extension");
+  if (!(videoBytes > 0) || videoBytes > bodyBytes - WAV_HEADER_BYTES) throw new RangeError("videoBytes must split the body into a video and a WAV");
+  return { videoBytes, inExt, outExt: remuxExtension(inExt) };
+}
+
 export const SYNC_LOCKED_KEYS = ["edgeLeadMs", "edgeTailMs"] as const;
 
 export function lockSync(s: Settings): Settings {

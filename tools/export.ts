@@ -12,21 +12,23 @@ import { parseArgs } from "node:util";
 import { TARGETS } from "../src/analysis/targets.ts";
 import { fileSampleRate } from "../src/audio/sample-rate.ts";
 import { sleep, startSession } from "./chrome.ts";
-import { decode, ffmpegEbur128 } from "./ffmpeg.ts";
+import { isVideoName, videoExportName } from "../src/master/video.ts";
+import { decode, ffmpegEbur128, lagAgainstPicture, videoMd5 } from "./ffmpeg.ts";
 
 const USAGE = `Usage: just export <track> [--set JSON] [--bits 24|16] [--out FILE]
 
-Exports <track> (a file name in MUSIC_DIR) through the Desk's export button and verifies the WAV with ffmpeg.
+Exports <track> (a file name in MUSIC_DIR) through the Desk's export button and verifies it with ffmpeg.
+A video exports as a video (dev server remux): also checks the picture is untouched and the sound in sync.
 Default --out: out/<track> (master).wav`;
 
 async function waitForDownload(dir: string, seconds: number): Promise<string> {
   const deadline = Date.now() + seconds * 1000;
   while (Date.now() < deadline) {
-    const done = readdirSync(dir).find((f) => f.endsWith(".wav"));
+    const done = readdirSync(dir).find((f) => !f.endsWith(".crdownload") && !f.startsWith("."));
     if (done) return join(dir, done);
     await sleep(250);
   }
-  throw new Error(`no WAV downloaded after ${seconds} s`);
+  throw new Error(`nothing downloaded after ${seconds} s`);
 }
 
 async function main(): Promise<number> {
@@ -50,7 +52,8 @@ async function main(): Promise<number> {
   }
   if (values.bits !== "24" && values.bits !== "16") throw new RangeError(`--bits must be 24 or 16, got ${values.bits}`);
   const track = positionals[0];
-  const out = resolve(values.out ?? `out/${track.replace(/\.[^.]+$/, "")} (master).wav`);
+  const video = isVideoName(track);
+  const out = resolve(values.out ?? (video ? `out/${videoExportName(track)}` : `out/${track.replace(/\.[^.]+$/, "")} (master).wav`));
   const q = new URLSearchParams({ track });
   if (values.set) {
     JSON.parse(values.set);
@@ -81,11 +84,22 @@ async function main(): Promise<number> {
   const r = ffmpegEbur128(channels, sampleRate);
   const ok = r.truePeak <= TARGETS.truePeakMax;
   console.log(`ffmpeg ebur128: I ${r.integrated.toFixed(1)} LUFS  LRA ${r.loudnessRange.toFixed(1)} LU  TP ${r.truePeak.toFixed(1)} dBTP ${ok ? "✓" : "✗ over"} ${TARGETS.truePeakMax}`);
-  const source = readFileSync(join(process.env.MUSIC_DIR ?? "../deluge-quest/web/public/audio", track));
+  const sourcePath = join(process.env.MUSIC_DIR ?? "../deluge-quest/web/public/audio", track);
+  const source = readFileSync(sourcePath);
   const sourceRate = fileSampleRate(source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength));
   const rateOk = sourceRate === null || sourceRate === sampleRate;
   console.log(`sample rate: ${sampleRate} Hz, source ${sourceRate ?? "unknown"} Hz ${rateOk ? "✓" : "✗"}`);
-  return ok && rateOk ? 0 : 1;
+  return ok && rateOk && (!isVideoName(out) || videoChecks(sourcePath, out, sampleRate, channels.length)) ? 0 : 1;
+}
+
+/** The picture is bit-identical and the new sound sits against it within 0.25 ms of where the old one did. */
+function videoChecks(source: string, out: string, rate: number, channels: number): boolean {
+  const same = videoMd5(source) === videoMd5(out);
+  console.log(`video stream: ${same ? "bit-identical to the source ✓" : "changed ✗"}`);
+  const lag = lagAgainstPicture(source, out, rate, channels);
+  const synced = Math.abs(lag) <= 0.00025 * rate;
+  console.log(`sync against the picture: ${lag} samples (${((lag / rate) * 1000).toFixed(2)} ms) ${synced ? "✓" : "✗"}`);
+  return same && synced;
 }
 
 main().then(

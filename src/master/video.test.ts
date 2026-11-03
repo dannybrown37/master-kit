@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "./settings.ts";
-import { assertSameLength, fitLength, isVideoName, lockSync, shiftStart, syncOffset } from "./video.ts";
+import { assertSameLength, fitLength, isVideoName, lockSync, parseRemuxUpload, shiftStart, syncOffset, videoExportName } from "./video.ts";
 
 const RATE = 48000;
 
@@ -41,6 +41,40 @@ describe("syncOffset", () => {
   it("silence can't be checked: throws rather than calling it in sync", () => {
     const quiet = new Float32Array(20 * RATE);
     expect(() => syncOffset([quiet], [quiet], RATE)).toThrow(/silent/);
+  });
+});
+
+describe("videoExportName", () => {
+  it.each([
+    ["Holiday.mp4", "Holiday (master).mp4"],
+    ["take 2.MOV", "take 2 (master).MOV"],
+    ["clip.webm", "clip (master).webm"],
+    ["old cam.avi", "old cam (master).mkv"],
+  ])("%s → %s", (track, want) => {
+    expect(videoExportName(track)).toBe(want);
+  });
+});
+
+describe("parseRemuxUpload", () => {
+  const q = (o: Record<string, string>): URLSearchParams => new URLSearchParams(o);
+
+  it("splits the body at videoBytes and picks the output container", () => {
+    expect(parseRemuxUpload(q({ name: "clip.mov", videoBytes: "1000" }), 5000)).toEqual({ videoBytes: 1000, inExt: ".mov", outExt: ".mov" });
+  });
+
+  it("only takes the extension from the name, never a path", () => {
+    expect(parseRemuxUpload(q({ name: "../../etc/x.avi", videoBytes: "10" }), 100)).toEqual({ videoBytes: 10, inExt: ".avi", outExt: ".mkv" });
+  });
+
+  it.each([
+    ["no name", { videoBytes: "10" }],
+    ["no videoBytes", { name: "a.mp4" }],
+    ["videoBytes not an integer", { name: "a.mp4", videoBytes: "1e3" }],
+    ["videoBytes zero", { name: "a.mp4", videoBytes: "0" }],
+    ["no room for the WAV", { name: "a.mp4", videoBytes: "90" }],
+    ["odd extension characters", { name: "a.m$4", videoBytes: "10" }],
+  ])("rejects %s", (_name, params) => {
+    expect(() => parseRemuxUpload(q(params), 100)).toThrow();
   });
 });
 

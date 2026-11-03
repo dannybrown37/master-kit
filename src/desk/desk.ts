@@ -37,7 +37,7 @@ import { AlbumView } from "../album/view.ts";
 import { DrillView } from "../drills/view.ts";
 import { trackUrl } from "../audio/tracks.ts";
 import { pickAudioFile, songTitle } from "../master/library.ts";
-import { SYNC_LOCKED_KEYS, assertSameLength, isVideoName } from "../master/video.ts";
+import { SYNC_LOCKED_KEYS, assertSameLength, isVideoName, videoExportName } from "../master/video.ts";
 import { MeterBar, button, clock, db, download, h, keyButton, setLabel, signed } from "./dom.ts";
 import { Palette } from "./palette.ts";
 import type { Command } from "./palette.ts";
@@ -114,7 +114,7 @@ const KEY_GROUPS: [string, [string, string][]][] = [
       ["l", `Drive for ${TARGETS.integrated} LUFS`],
       ["m", "measure the whole song"],
       ["z", "restart the meters"],
-      ["e E", "export WAV 24 / 16-bit"],
+      ["e E", "export WAV 24 / 16-bit (a video: e exports the video)"],
     ],
   ],
   ["Modes", [["d", "desk / drills"]]],
@@ -171,6 +171,8 @@ export class Desk {
   protected track = "";
   /** The song is a video's sound: Lead-in and Tail are locked at 0 and export must keep the exact length. */
   protected video = false;
+  /** The video file itself, kept for Export video (decoding detaches the other copies). */
+  private videoBytes: ArrayBuffer | null = null;
   protected originalReport: Report | null = null;
   protected measured: Measured | null = null;
   /** The song decoded at its file's own sample rate: what gets measured, rendered and exported. */
@@ -313,7 +315,7 @@ export class Desk {
     this.listenEl = h("span", "listen");
     this.abButton = keyButton("A/B", "a", () => this.engine.toggleAB(), "hear the original at matched loudness");
     this.measureButton = keyButton("Measure", "m", () => this.run(this.measureMaster()), "render the whole song offline and score it");
-    this.exportButton = keyButton("Export", "e", () => this.run(this.exportWav(24)), "24-bit WAV (E: 16-bit dithered)");
+    this.exportButton = keyButton("Export", "e", () => this.run(this.exportMain()), "24-bit WAV, or the video with the master under it (E: 16-bit WAV)");
     this.exportButton.classList.add("primary");
     this.refButton = keyButton("Ref", "r", () => this.engine.toggleReference(), "hear the reference at the master's loudness");
     this.monoButton = keyButton("Mono", "o", () => this.engine.toggleMono(), "listen summed to mono (phone speaker, club PA)");
@@ -533,7 +535,8 @@ export class Desk {
       cmd("Master", "Redo", () => this.undo(true), "U"),
       cmd("Master", "Measure the whole song", () => this.measureMaster(), "m", { terms: "score render" }),
       cmd("Master", "Restart the meters", () => this.engine.resetMeters(), "z", { terms: "zero" }),
-      cmd("File", "Export WAV 24-bit", () => this.exportWav(24), "e", { terms: "download save" }),
+      ...(this.video ? [cmd("File", "Export video (master under the picture)", () => this.exportVideo(), "e", { terms: "download save mp4 mux" })] : []),
+      cmd("File", "Export WAV 24-bit", () => this.exportWav(24), this.video ? undefined : "e", { terms: "download save" }),
       cmd("File", "Export WAV 16-bit (dithered)", () => this.exportWav(16), "E", { terms: "download save cd" }),
       cmd("File", "Save session to a file", () => this.saveSession(), undefined, { terms: "json download" }),
       cmd("File", "Load a session file (u undoes)", () => this.sessionFile.click(), undefined, { terms: "json open" }),
@@ -663,6 +666,7 @@ export class Desk {
   protected async loadData(name: string, data: ArrayBuffer, settings: Settings | null = null, video = isVideoName(name)): Promise<void> {
     this.say(`loading ${name}…`);
     const copy = data.slice(0);
+    this.videoBytes = video ? data.slice(0) : null;
     await this.engine.load(data);
     this.track = name;
     this.video = video;
@@ -885,19 +889,62 @@ export class Desk {
     );
   }
 
-  /** Renders (or reuses) the full-song master and downloads it as WAV at the song's own sample rate. */
-  protected async exportWav(bits: BitDepth): Promise<void> {
+  /** The full-song master (rendered or reused) as WAV at the song's own sample rate, edges applied. */
+  private async masterWav(bits: BitDepth): Promise<{ wav: ArrayBuffer; name: string; summary: string } | null> {
     const m = await this.measureMaster();
-    if (!m) return;
+    if (!m) return null;
     const { settings, bypass } = this.state;
     const out = applyEdges(m.rendered.master, m.rendered.sampleRate, edgeParams(settings, bypass));
     if (this.video && this.native) assertSameLength((await this.native).length, out[0].length);
-    const wav = encodeWav(out, m.rendered.sampleRate, bits);
-    const name = `${safeBaseName(this.track)} (master ${bits}-bit).wav`;
-    download(new Blob([wav], { type: "audio/wav" }), name);
     const r = m.report;
+    return {
+      wav: encodeWav(out, m.rendered.sampleRate, bits),
+      name: `${safeBaseName(this.track)} (master ${bits}-bit).wav`,
+      summary: `${(m.rendered.sampleRate / 1000).toFixed(1)} kHz · ${db(r.integrated)} LUFS · ${db(r.truePeak)} dBTP`,
+    };
+  }
+
+  private exportMain(): Promise<void> {
+    return this.video ? this.exportVideo() : this.exportWav(24);
+  }
+
+  protected async exportWav(bits: BitDepth): Promise<void> {
+    const w = await this.masterWav(bits);
+    if (!w) return;
+    download(new Blob([w.wav], { type: "audio/wav" }), w.name);
     this.exported = true;
-    this.say(`exported "${name}" · ${(m.rendered.sampleRate / 1000).toFixed(1)} kHz · ${db(r.integrated)} LUFS · ${db(r.truePeak)} dBTP`);
+    this.say(`exported "${w.name}" · ${w.summary}`);
+  }
+
+  /** The dev server muxes the master under the picture (`tools/remux.ts`, sync-checked); without it, the WAV + how to remux. */
+  protected async exportVideo(): Promise<void> {
+    const video = this.videoBytes;
+    if (!video) return this.exportWav(24);
+    const w = await this.masterWav(24);
+    if (!w) return;
+    this.busy = "putting the master under the picture (checking sync)…";
+    this.schedule();
+    let res: Response;
+    try {
+      const q = new URLSearchParams({ name: this.track, videoBytes: String(video.byteLength) });
+      res = await fetch(`/api/remux?${q}`, { method: "POST", body: new Blob([video, w.wav]) });
+    } finally {
+      this.busy = "";
+    }
+    if (res.status === 404) {
+      download(new Blob([w.wav], { type: "audio/wav" }), w.name);
+      this.exported = true;
+      this.say(`Export video needs the dev server (just dev); exported "${w.name}" instead: just remux "<video>" "${w.name}"`, true);
+      return;
+    }
+    if (!res.ok) {
+      this.say(`video not exported: ${await res.text()}`, true);
+      return;
+    }
+    const name = videoExportName(this.track);
+    download(await res.blob(), name);
+    this.exported = true;
+    this.say(`exported "${name}" · in sync · ${w.summary}`);
   }
 
   /** `group` null makes the change its own undo step (resets, hints); otherwise quick turns of one knob merge. */
@@ -1127,7 +1174,7 @@ export class Desk {
       i: () => (this.explain = !this.explain),
       ...Object.fromEntries(MODULES.map((_, i) => [String(i + 1), () => (this.nav = jumpModule(this.nav, i))])),
       h: () => this.applyHint(this.currentHints.find((x) => x.knob && x.suggest !== undefined)),
-      e: () => this.exportWav(24),
+      e: () => this.exportMain(),
       E: () => this.exportWav(16),
       z: () => this.engine.resetMeters(),
     };
@@ -1199,6 +1246,7 @@ export class Desk {
     if (s.solo !== null) this.listenEl.textContent += ` · SOLO ${formatParam("eqMudFreq", s.solo)}`;
     this.measureButton.disabled = !!this.busy || !this.engine.loaded;
     this.exportButton.disabled = this.measureButton.disabled;
+    setLabel(this.exportButton, this.video ? "Export video" : "Export");
 
     const current = selected(this.nav);
     for (const [key, view] of this.knobs) {
